@@ -107,6 +107,10 @@ python3 "$SUPERAGENT/memory/mem.py" reindex
 
 可审计。每次运行追加 `runs.jsonl`，任务原文可以直接 `grep`。
 
+## 提示词
+
+只装插件不够用：没有提示词，主会话会自己动手，`python`、`terminal` 也还能绕过只读限制。要让「主会话只查、判、派」成立，得把这段规矩写进 `AGENTS.md`。原文和实测边界见 [docs/prompt-rules.md](docs/prompt-rules.md)。
+
 ## 已知限制
 
 单机。队列是本地目录，多台机器不共享，也没有远端副本。
@@ -143,6 +147,7 @@ dshm-local-superagent/
 ├── docs/
 │   ├── architecture.md
 │   └── memory.md
+│   └── prompt-rules.md
 └── .gitignore
 ```
 
