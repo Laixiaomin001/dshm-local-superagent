@@ -1,0 +1,9 @@
+{
+  "name": "dshm-local-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local long-term memory as four agent tools (user-supplied python backend)",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js"
+}

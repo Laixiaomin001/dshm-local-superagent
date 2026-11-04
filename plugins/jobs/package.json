@@ -1,0 +1,9 @@
+{
+  "name": "dshm-local-jobs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "In-process job scheduler for the local superagent: a JSON table, hard timeouts, catch-up, jitter, backoff",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js"
+}

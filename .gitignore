@@ -1,0 +1,15 @@
+# Host-provided dependency: recreate the symlink at install time.
+node_modules/
+
+# Local runtime data (never commit a queue, job table, or memory store).
+.local-superagent/
+*.log
+
+# Python bytecode from syntax checks
+__pycache__/
+*.pyc
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

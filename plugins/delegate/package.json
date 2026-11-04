@@ -1,0 +1,9 @@
+{
+  "name": "dshm-local-delegate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "description": "Local delegate: queue a task from a session, poll it in-process, run it in a child agent session, and report the result back. No network, no repository."
+}
