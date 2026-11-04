@@ -146,7 +146,7 @@ dshm-local-superagent/
 │   └── persona.py
 ├── docs/
 │   ├── architecture.md
-│   └── memory.md
+│   ├── memory.md
 │   └── prompt-rules.md
 └── .gitignore
 ```
