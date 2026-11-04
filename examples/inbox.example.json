@@ -1,0 +1,8 @@
+{
+  "id": "d-mf3k2p0-7c1b9e4a",
+  "title": "Count markdown files in the workspace",
+  "task": "Count the .md files under the current directory, three levels deep at most. Reply with the count and the largest file name.",
+  "cwd": "/home/you/work",
+  "sessionId": "REPLACE_WITH_LIVE_SESSION_ID",
+  "createdAt": "2026-01-01T12:00:00.000Z"
+}

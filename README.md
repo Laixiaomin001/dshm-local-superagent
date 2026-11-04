@@ -1,5 +1,7 @@
 # dshm-local-superagent
 
+[English](README.en.md)
+
 不依赖 GitHub、不依赖任何在线仓库的本地 superagent 骨架。
 
 主会话派单 → 本地队列 → 进程内轮询 → 子会话 worker → 回报。链路里没有服务器、没有外网、没有常驻进程，只有本地 JSON 文件和一个跟随宿主启停的定时器。
@@ -123,7 +125,12 @@ python3 "$SUPERAGENT/memory/mem.py" reindex
 
 ```
 dshm-local-superagent/
-├── README.md
+├── README.md         中文
+├── README.en.md      英文
+├── LICENSE           MIT
+├── examples/
+│   ├── e2e.md        端到端验证步骤
+│   └── inbox.example.json
 ├── plugins/
 │   ├── delegate/    index.js + package.json
 │   ├── memory/      index.js + package.json
@@ -141,4 +148,4 @@ dshm-local-superagent/
 
 ## 许可
 
-MIT License. Copyright (c) 2026 dshm-local-superagent contributors.
+MIT，见 [LICENSE](LICENSE)。

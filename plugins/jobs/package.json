@@ -1,9 +1,27 @@
 {
   "name": "dshm-local-jobs",
   "version": "0.1.0",
-  "private": true,
-  "description": "In-process job scheduler for the local superagent: a JSON table, hard timeouts, catch-up, jitter, backoff",
+  "description": "In-process job scheduler for the local superagent: JSON task table, hard timeouts, catch-up, jitter, backoff.",
   "type": "module",
   "main": "index.js",
-  "exports": "./index.js"
+  "exports": "./index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "scheduler",
+    "cron",
+    "local-first"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Laixiaomin001/dshm-local-superagent.git",
+    "directory": "plugins/jobs"
+  },
+  "files": [
+    "index.js",
+    "package.json"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  }
 }

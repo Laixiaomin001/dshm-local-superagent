@@ -1,9 +1,28 @@
 {
   "name": "dshm-local-delegate",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "index.js",
   "exports": "./index.js",
-  "description": "Local delegate: queue a task from a session, poll it in-process, run it in a child agent session, and report the result back. No network, no repository."
+  "description": "Local delegate queue: a session queues a task, the plugin polls in-process, runs a child agent session and reports back. No network.",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "agent",
+    "local-first",
+    "delegate",
+    "subagent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Laixiaomin001/dshm-local-superagent.git",
+    "directory": "plugins/delegate"
+  },
+  "files": [
+    "index.js",
+    "package.json"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  }
 }
