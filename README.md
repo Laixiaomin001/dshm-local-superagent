@@ -111,6 +111,14 @@ python3 "$SUPERAGENT/memory/mem.py" reindex
 
 只装插件不够用：没有提示词，主会话会自己动手，`python`、`terminal` 也还能绕过只读限制。要让「主会话只查、判、派」成立，得把这段规矩写进 `AGENTS.md`。原文和实测边界见 [docs/prompt-rules.md](docs/prompt-rules.md)。
 
+## 通用版与部署版
+
+仓库里的 `plugins/` 是通用版：队列根目录走 `LOCAL_SUPERAGENT_QUEUE`，默认 `~/.local-superagent/delegate`，插件名 `dshm-local-delegate`。
+
+真在一台机器上跑时，通常是复制一份到 profile 的 `node_modules/` 下改成部署版：队列路径写死成这台机器的固定目录（和 `tools/*.py` 共用同一个队列），插件名改成 profile 里登记的名字，通报文案换成本地语言。功能一样——线程记录、`delegate_reply`、四条约束、归档策略两边都有。
+
+**改的顺序**：先改部署版（profile 里正在跑的那份），验完再同步回仓库。反过来做，重启后加载的还是旧模块，看起来像"改了没生效"——这个坑踩过一次。
+
 ## 现场手记
 
 在鸿蒙平板上把这套东西跑起来的过程、踩过的坑和架构图：[docs/field-notes.md](docs/field-notes.md)。
