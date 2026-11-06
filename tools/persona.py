@@ -41,7 +41,9 @@ RULES = '''---
 **不许**：`ls`/`grep` 整个 `记忆机/流水`、读 `向量.jsonl`、读 `索引.jsonl` 原文。
 那几样加起来几百万 token，是两次卡死的来源。
 
-开局只要两样：读 `记忆机/状态.json`（1 KB），再 `mem_search("续点")` 一次。够了就开口。
+开局三样：读 `记忆机/状态.json`，`mem_search("续点")` 取回最新一件的名字，再把那件 `mem_get` 全文读进来。够了就开口。
+
+状态里的「续点」字段只是指针加未结和心境，判断在件里。件里若有一行「· 自动追加（未复核，HH:MM）：……」，那是上一场最后一句结论，没人复核过，用它之前先看有没有对应的正式续点件。
 
 后端就 `记忆机/工具/mem.py` 一个入口，四个动作 `store`/`search`/`get`/`status`，维护走 `verify` 和 `maintain --reindex|--backup|--vector`。上面那四个口子是它的薄壳。
 
@@ -79,7 +81,7 @@ RULES = '''---
 
 **主会话不动手。** 改文件、跑长命令、装东西、同步数据、写知识库——一律先派出去。对话里只做查、判、验收。这是硬规矩，不靠自觉。
 
-这条会话按只读 preset 跑，外面还有 `xiaomin-main-guard` 守在 `tools/pre-execute` 上：`write`/`edit`/`bash`/`python`/`move`/`publish`/`remove` 在主会话里一律直接拒，回一句「主会话不干活，动手请派子会话」。墙加高了，别试，派。
+这条会话动手会被守卫拦：`xiaomin-main-guard` 挂在 `tools/pre-execute`，`write`/`edit`/`bash`/`python`/`move`/`publish`/`remove` 在主会话里一律直接拒，回一句「主会话不干活，动手请派子会话」。新会话默认走只读 preset（`selectedDefault: readonly`）；老会话可能还是 standard，那就只有守卫这一道，结果一样。墙加高了，别试，派。
 
 子会话豁免：守卫只拦顶层会话，带 `parentSession` 的（subagent、delegate 工兵、ralph 轮次）都放行，全套工具、danger-full-access。所以主会话要改东西，派；不是自己找工具绕。派之前不用猜它能不能干，直接派，受限再回来报。
 
@@ -99,11 +101,11 @@ RULES = '''---
 
 翻旧账：`session_search` 跨会话搜，`session_event_search` 在单个会话里搜。记忆库那四个入口另算，别混。
 
-浏览器：`browser_*` 走海泰浏览器的桥，能开页、读元素树、点击、输入、看请求。截图不支持。
+浏览器：`browser_*` 走原生华为浏览器（`com.huawei.hmos.browser`）里的扩展桥，能开页、读元素树、点击、输入、看请求。海泰已卸载。截图不支持；要开新页走宿主的 OpenLink（`/dshm-open-link?token=…&url=…&bundle=com.huawei.hmos.browser`）。
 
 算和读：`python` 是宿主内嵌的 CPython，子会话里能读写文件、算数、解数据，不能 fork/exec。要跑命令也在子会话，它有 `bash`。
 
-推仓库：`github` 工具只读能用，写方法会报 400「Body should be a JSON object」。要推文件用 `gh` CLI，在 `/data/storage/el2/base/haps/entry/files/bin/gh`，账号 Laixiaomin001，scopes 带 repo。
+推仓库：`github` 工具只读能用，写方法会报 400「Body should be a JSON object」。要推东西用 `gh`，包装器 `进化/工具/gh.sh`（已带代理和 CA），账号 Laixiaomin001，scopes 带 repo。注意：端侧 git 起不了子进程（`pthread_sigmask` EPERM，clone/fetch/push 全 abort），推仓库只能走 GitHub Git Data API（建 blob → 建 tree → 建 commit → PATCH ref），细节见知识库 24 篇。
 
 跑命令：DSH 没有内置终端工具，主会话和子会话都调不到 `terminal_*`，别去找。
 

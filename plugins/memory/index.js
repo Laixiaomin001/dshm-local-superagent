@@ -7,6 +7,12 @@
  *  · 返回体积有上限：search 由 mem.py 封顶 2KB，get 由 --max 封顶 8KB
  *
  * 后端：$MEM/工具_v2/mem.py（纯标准库 python，无常驻进程）
+ *
+ * 另外挂一个全局 session/event 钩子（2026-11-06）：顶层会话每回合结束时，把本回合
+ * 最后一条助手消息的尾巴（≤200 字）追进 状态.json 续点，按会话各一行
+ * 「· 自动追加（未复核，HH:MM，<短id>）：…」，最多留 2 行。session.id 原样
+ * 传给 mem.py 的 --session，由 mem.py 取前 8 位做短 id。
+ * 子会话（subagent/delegate）不写；任何异常只记日志，不拖垮宿主。
  */
 import { spawn } from 'node:child_process'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -16,6 +22,7 @@ export const inject = ['tools']
 
 const MEM_PY = '/storage/Users/currentUser/Documents/小敏/记忆机/工具/mem.py'
 const PY = '/data/storage/el2/base/haps/entry/files/bin/python3'
+const RESUME_TAIL = 200
 
 function runOnce(args, timeoutMs) {
   return new Promise((resolve) => {
@@ -119,9 +126,79 @@ const statusTool = defineTool({
   },
 })
 
+/**
+ * 取事件里助手的回复正文：只认 content 里 type === 'text' 的段落。
+ * 同一份 content 里 reasoning（模型思考）也带 text 字段，必须跳过；
+ * tool-call / image / file 段没有可当正文的文本，同样跳过。
+ * 只剩思考没有正文时返回 ''，由调用方按「没文本就跳过」处理。
+ * 口径跟 xiaomin-sentinel 的 textOf 不同（那边收料另算），别合并。
+ */
+function textOf(event) {
+  const d = event && event.data; const msg = d && (d.message || (d.role === 'user' ? d : null))
+  if (!msg || !Array.isArray(msg.content)) return ''
+  const parts = []
+  for (const c of msg.content) {
+    if (c && c.type === 'text' && typeof c.text === 'string') parts.push(c.text)
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 顶层会话判定，字段来自 dsh-session 的 SessionHeader
+ * （cores/.../node_modules/@deepseek-ai/dsh-session/lib/index.js 的 validateSessionHeader）：
+ * 子会话由 dsh-subagent 的 childSessionMeta() 建，一定带 parentSession + origin:'subagent'
+ * + 正数 delegationDepth；顶层会话这三样都没有。
+ */
+export function isTopLevelSession(session) {
+  const h = (session && session.header) || {}
+  const parent = h.parentSession || session?.parentSession || session?.parentSessionId
+  if (parent) return false
+  if (h.origin === 'subagent') return false
+  if (typeof h.delegationDepth === 'number' && h.delegationDepth > 0) return false
+  return true
+}
+
+// 每个会话本回合最后一条 assistant/message 的文本；turn/start 清，turn/end 用。
+const lastAssistant = new Map()
+
+function logHookError(e) {
+  try { console.error('xiaomin-memory: resume-auto：' + String((e && e.message) || e).slice(0, 300)) } catch (_) { /* 日志本身也不能炸 */ }
+}
+
+/**
+ * 全局 session/event 钩子主体。只处理 turn/end：把本回合最后一条助手消息的尾巴
+ * 连同 session.id 交给 mem.py resume-auto。导出是为了宿主外能喂假事件做 stub 测试。
+ */
+export async function onSessionEvent(session, event) {
+  try {
+    if (!session || !event) return
+    const id = String(session.id || '')
+    if (!id) return
+    if (event.type === 'turn/start') {
+      lastAssistant.delete(id)
+      return
+    }
+    if (event.type === 'assistant/message') {
+      const t = textOf(event)
+      if (t) lastAssistant.set(id, t)
+      return
+    }
+    if (event.type !== 'turn/end') return
+    const tail = lastAssistant.get(id)
+    lastAssistant.delete(id)
+    if (!tail) return
+    if (!isTopLevelSession(session)) return
+    await callMem(['resume-auto', '--text=' + tail.slice(-RESUME_TAIL), '--session=' + id])
+  } catch (e) {
+    logHookError(e)
+  }
+}
+
 export function apply(ctx) {
   ctx.tools.register(searchTool)
   ctx.tools.register(getTool)
   ctx.tools.register(storeTool)
   ctx.tools.register(statusTool)
+  ctx.on('session/event', (session, event) => { onSessionEvent(session, event) }, { global: true })
 }
+

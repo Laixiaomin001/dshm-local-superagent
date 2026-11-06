@@ -20,6 +20,15 @@
                                    纯 FTS，返回 mode=fts、provider、degraded_reason，不报错。
                                    --fts 强制只走 FTS5；--hybrid 强制混合。
   mem.py get    NAME [--max 8000] [--json]
+  mem.py resume-auto --text T [--session ID]
+                                   顶层会话回合结束时自动追加续点。按会话短 id
+                                   （--session 去掉可选 session- 前缀后取前 8 位，缺省 ?）
+                                   各占一行「· 自动追加（未复核，HH:MM，<短id>）：…」：
+                                   同一 id 原位替换，不同 id 各一行，最多留 2 行，
+                                   超出按行出现先后丢最旧的那行。新行插在【续点】与
+                                   【未结】之间（无【未结】则末尾）。未结/心境/计数/
+                                   最后存入一律不碰；写前备份，状态文件不存在就报错，
+                                   绝不新建。
   mem.py status [--json]
   mem.py verify                    只读体检：磁盘与索引是否对得上，输出 JSON，ok 时 exit 0
   mem.py maintain --reindex|--backup|--vector [--provider bailian|auto]
@@ -248,6 +257,105 @@ def update_state(target, title, at):
         os.replace(tmp, STATE)
     except Exception as e:
         print(f'mem: 状态.json 回写失败（已忽略）：{e}', file=sys.stderr)
+
+
+RESUME_AUTO_PREFIX = '· 自动追加（未复核'
+RESUME_AUTO_RE = re.compile(r'^·\s*自动追加（未复核，(\d{2}:\d{2})(?:，([^）\s]+))?）：')
+RESUME_AUTO_MAX = 2
+
+
+def resume_auto_sid(line):
+    """整行前缀识别「自动追加」行，返回短 id；不是这种行返回 None。
+
+    老格式（没写 id 段）按 '?' 算，跟 --session 缺省同档。
+    """
+    s = line.lstrip()
+    if not s.startswith(RESUME_AUTO_PREFIX):
+        return None
+    m = RESUME_AUTO_RE.match(s)
+    if not m:
+        return None
+    return m.group(2) or '?'
+
+
+def short_session_id(raw):
+    """会话短 id：去掉可选的 session- 前缀后取前 8 位；没传就是 ?。
+
+    顶层会话 id 有纯 uuid 和 session-<uuid> 两种形态。后者照字面取前 8 位
+    只剩 'session-'，不同会话会挤成一行，所以先剥前缀再截。
+    """
+    s = str(raw or '').strip()
+    if s.startswith('session-') and len(s) > len('session-'):
+        s = s[len('session-'):]
+    return s[:8] or '?'
+
+
+def apply_resume_auto(old, line, sid):
+    """按会话短 id 插/换「自动追加」行，别段原样返回。
+
+    - 同一短 id 已有行：原位替换，不新增（混进来的同 id 重复行并掉）；
+    - 不同 id：各占一行，新行落在自动追加块末尾；
+    - 新行位置在【续点】与【未结】之间，找不到【未结】就放末尾；
+    - 自动追加行最多 RESUME_AUTO_MAX 行，超出按行出现先后（不看时间）丢最旧的。
+    只认整行前缀，免得误伤【未结】里恰好提到「自动追加」的条目。
+    """
+    lines = old.split('\n') if old else []
+    marks = [(i, resume_auto_sid(s)) for i, s in enumerate(lines)]
+    marks = [(i, m) for i, m in marks if m is not None]
+
+    hit = next((i for i, m in marks if m == sid), None)
+    if hit is not None:
+        lines[hit] = line
+        for i in sorted((i for i, m in marks if m == sid and i != hit), reverse=True):
+            del lines[i]
+    else:
+        sp = next((i for i, s in enumerate(lines) if s.lstrip().startswith('【续点】')), None)
+        wj = next((i for i, s in enumerate(lines) if s.lstrip().startswith('【未结】')), None)
+        if sp is not None and wj is not None and wj > sp:
+            lines.insert(wj, line)
+        else:
+            lines.append(line)
+
+    # 行数上限：重新数一遍，按出现先后从最旧的开始删
+    marks = [i for i, s in enumerate(lines) if resume_auto_sid(s) is not None]
+    for i in reversed(marks[:max(0, len(marks) - RESUME_AUTO_MAX)]):
+        del lines[i]
+    return '\n'.join(lines)
+
+
+def cmd_resume_auto(a):
+    """顶层会话回合结束时的续点自动追加：只改【续点】段，其他字段一概不动。"""
+    guard()
+    text = ' '.join(str(a.text or '').split())[:200]
+    if not text:
+        raise SystemExit('mem: --text 不能为空')
+    sid = short_session_id(a.session)
+    line = f'· 自动追加（未复核，{time.strftime("%H:%M")}，{sid}）：{text}'
+    lock = acquire_lock()
+    try:
+        # 读写都在锁里：store 的 update_state 也是持锁回写，避免读到旧值再覆盖回去。
+        if not STATE.is_file():
+            raise SystemExit(f'mem: 找不到 {STATE.name}，不新建')
+        try:
+            state = json.loads(STATE.read_text(encoding='utf-8'))
+        except Exception as e:
+            raise SystemExit(f'mem: {STATE.name} 读不出来：{e}')
+        if not isinstance(state, dict):
+            raise SystemExit(f'mem: {STATE.name} 不是对象')
+        old = str(state.get('续点') or '')
+        if not old.strip():
+            raise SystemExit(f'mem: {STATE.name} 里没有续点，不写')
+        state['续点'] = apply_resume_auto(old, line, sid)
+        bak = STATE.with_name(f'{STATE.name}.bak-{time.strftime("%Y%m%d-%H%M")}')
+        if bak.exists():
+            bak = STATE.with_name(f'{STATE.name}.bak-{time.strftime("%Y%m%d-%H%M%S")}')
+        bak.write_bytes(STATE.read_bytes())
+        tmp = STATE.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
+        os.replace(tmp, STATE)
+    finally:
+        lock.close()
+    print(json.dumps({'ok': True, 'line': line, 'session': a.session or '', 'id': sid}, ensure_ascii=False))
 
 
 def cmd_store(a):
@@ -1122,6 +1230,10 @@ def main():
     g = sub.add_parser('get'); g.add_argument('name'); g.add_argument('--max', default=8000)
     g.add_argument('--json', action='store_true'); g.set_defaults(fn=cmd_get)
     st = sub.add_parser('status'); st.add_argument('--json', action='store_true'); st.set_defaults(fn=cmd_status)
+    ra = sub.add_parser('resume-auto')
+    ra.add_argument('--text', required=True, help='本回合尾巴，压成一行，最多 200 字')
+    ra.add_argument('--session', default='', help='会话 id；取前 8 位做行标记，缺省 ?')
+    ra.set_defaults(fn=cmd_resume_auto)
     ri = sub.add_parser('reindex'); ri.set_defaults(fn=cmd_reindex)
     v = sub.add_parser('verify'); v.set_defaults(fn=cmd_verify)
     mt = sub.add_parser('maintain')
