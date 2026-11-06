@@ -1,29 +1,18 @@
-/**
- * dshm-local-delegate — a local delegate queue.
- *
- * A live session queues a task as one JSON file; this plugin polls the inbox
- * in-process, starts a child agent session as the worker, and reports the
- * result back to the session that queued it.
- *
- * No network, no repository, no resident process: the poller is a timer inside
- * the host, so it starts and stops with the host.
- */
+/** xiaomin-delegate: local delegate queue -> child agent worker -> report back. */
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const name = 'dshm-local-delegate'
+export const name = 'xiaomin-delegate'
 export const inject = ['tools', 'timer', 'agents', 'subagents']
 
-const HOME = process.env.LOCAL_SUPERAGENT_HOME || join(homedir(), '.local-superagent')
-const ROOT = process.env.LOCAL_SUPERAGENT_QUEUE || join(HOME, 'delegate')
+const ROOT = '/storage/Users/currentUser/Documents/小敏/运行/派单'
 const INBOX = join(ROOT, 'inbox')
 const DONE = join(ROOT, 'done')
-const DEFAULT_CWD = process.env.LOCAL_SUPERAGENT_WORKSPACE || homedir()
-const POLL_MS = Number(process.env.LOCAL_SUPERAGENT_POLL_MS || 10 * 1000)
-const WORKER_TIMEOUT_MS = Number(process.env.LOCAL_SUPERAGENT_WORKER_TIMEOUT_MS || 30 * 60 * 1000)
+const DEFAULT_CWD = '/storage/Users/currentUser/Download'
+const POLL_MS = 10 * 1000
+const WORKER_TIMEOUT_MS = 30 * 60 * 1000
 const KEEP_DONE = 200
 const RESULT_TEXT_CAP = 400
 
@@ -31,7 +20,7 @@ const textOutput = {
   schema: {
     type: 'object',
     additionalProperties: false,
-    properties: { text: { type: 'string', required: true, description: 'Result or a short explanation.' } },
+    properties: { text: { type: 'string', required: true, description: '结果或说明。' } },
   },
   render: (_args, value) => [{ type: 'text', text: String(value.text || '') }],
 }
@@ -59,6 +48,7 @@ function workerPrompt(rec) {
     '3. Your reply goes straight back to the main session, so no pleasantries.',
   ].join('\n')
 }
+
 
 function tryJson(s) {
   try { return JSON.parse(s) } catch (e) { return undefined }
@@ -120,7 +110,7 @@ export function apply(ctx) {
       if (files.length <= KEEP_DONE) return
       files.sort()
       for (const f of files.slice(0, files.length - KEEP_DONE)) {
-        try { unlinkSync(join(DONE, f)) } catch (e) { /* ignore */ }
+        try { writeFileSync(join(DONE, f), '') } catch (e) { /* ignore */ }
       }
     } catch (e) { /* ignore */ }
   }
@@ -167,9 +157,9 @@ export function apply(ctx) {
   }
 
   function formatNotice(rec) {
-    const head = '[delegate] finished: ' + (rec.title || rec.id)
+    const head = '【派单完成】' + (rec.title || rec.id)
     const body = String(rec.output || rec.reason || '').slice(0, RESULT_TEXT_CAP)
-    const tail = '\n\nFull record: ' + join(DONE, rec.id + '.json')
+    const tail = '\n\n全文在 ' + join(DONE, rec.id + '.json')
     return head + '\n' + body + tail
   }
 

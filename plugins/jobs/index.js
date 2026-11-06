@@ -1,41 +1,36 @@
 /**
- * dshm-local-jobs — an in-process job scheduler.
+ * xiaomin-jobs —— 进程内调度器（运行层重写，2026-11-04）
  *
- * Design:
- *  · apply() reads the job table, registers two tools, and arms one timer;
- *    it does not spawn a child or probe a port at startup
- *  · each job runs as an argv array (no shell), with a hard timeout that
- *    SIGKILLs the whole process group
- *  · missed runs are caught up once if within 2x the interval, otherwise skipped
- *  · next run gets +/-10% jitter
- *  · a job is skipped while the same id is still running
- *
- * Table: $LOCAL_SUPERAGENT_HOME/jobs/jobs.json, editable by hand.
- * Runs:  $LOCAL_SUPERAGENT_HOME/jobs/runs.jsonl, append-only.
+ * 设计见 文档/运行层重写-设计.md。要点：
+ *  · apply() 只读任务表、注册两个工具、挂一个 60 秒定时器；不 spawn、不探端口
+ *  · 每条任务：数组命令（不过 shell）、硬超时（到点 SIGKILL 整组）、失败指数退避
+ *  · 补跑：错过的下一次若在 2×间隔内，开机后补跑一次，否则只顺延
+ *  · 抖动：算下次时加 ±10%
+ *  · 防重叠：同一条在跑就跳过本拍
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, appendFileSync, writeFileSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const name = 'dshm-local-jobs'
+export const name = 'xiaomin-jobs'
 export const inject = ['tools', 'timer']
 
-const HOME = process.env.LOCAL_SUPERAGENT_HOME || join(homedir(), '.local-superagent')
-const DIR = process.env.LOCAL_SUPERAGENT_JOBS_DIR || join(HOME, 'jobs')
-const JOBS = join(DIR, 'jobs.json')
-const RUNS = join(DIR, 'runs.jsonl')
-const TICK_MS = Number(process.env.LOCAL_SUPERAGENT_TICK_MS || 60_000)
-const DEFAULT_CWD = process.env.LOCAL_SUPERAGENT_WORKSPACE || homedir()
+const MEM = process.env.XIAOMIN_MEM || '/storage/Users/currentUser/Documents/小敏/记忆机'
+const DIR = MEM + '/运行'
+const JOBS = DIR + '/jobs.json'
+const RUNS = DIR + '/runs.jsonl'
+const TICK_MS = Number(process.env.XIAOMIN_TICK_MS || 60_000)
 
-// Written once when no table exists. Disabled on purpose: registering a job
-// must not start running anything by surprise.
 const DEFAULT_JOBS = {
   jobs: [
     {
-      id: 'example', title: 'Example job', enabled: false, every: 3600, timeout: 60,
-      cmd: ['python3', '-c', 'print("hello from the local scheduler")'],
+      id: 'health', title: '体检', enabled: true, every: 3600, timeout: 90,
+      cmd: ['python3', '/storage/Users/currentUser/Documents/小敏/进化/工具/体检.py'],
+      next_run: 0, failures: 0, last_status: null, last_end: 0,
+    },
+    {
+      id: 'backup', title: '日备份', enabled: true, at: '03:10', timeout: 600,
+      cmd: ['python3', '/storage/Users/currentUser/Documents/小敏/记忆机/工具/jiyi.py', 'backup'],
       next_run: 0, failures: 0, last_status: null, last_end: 0,
     },
   ],
@@ -63,7 +58,7 @@ export function load() {
   }
   try {
     const d = JSON.parse(readFileSync(JOBS, 'utf8'))
-    if (!d || !Array.isArray(d.jobs)) throw new Error('jobs is not an array')
+    if (!d || !Array.isArray(d.jobs)) throw new Error('jobs 不是数组')
     return d
   } catch (e) {
     try { renameSync(JOBS, JOBS + '.broken-' + Date.now()) } catch { /* ignore */ }
@@ -76,7 +71,7 @@ function save() {
     const tmp = JOBS + '.tmp'
     writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8')
     renameSync(tmp, JOBS)
-  } catch (e) { /* if the disk refuses, keep running from memory */ }
+  } catch (e) { /* 写不进就只在内存里跑 */ }
 }
 
 function jitter(ms) {
@@ -150,7 +145,7 @@ export function runJob(job, reason) {
       child = spawn(bin, args, {
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        cwd: job.cwd || DEFAULT_CWD,
+        cwd: '/storage/Users/currentUser/Documents/小敏',
       })
       child.stdout.on('data', (d) => { if (out.length < 64 * 1024) out += String(d) })
       child.stderr.on('data', (d) => { if (err.length < 64 * 1024) err += String(d) })
@@ -167,12 +162,11 @@ export function runJob(job, reason) {
 }
 
 export async function tick() {
-  // Re-read the table when the file is edited, so changing a timeout does not
-  // require a host restart.
+  // 任务表被手改过就重新读，免得为改一个超时又重启一次宿主
   try {
     const m = statSync(JOBS).mtimeMs
     if (m !== jobsMtime) { state = load(); jobsMtime = m }
-  } catch (e) { /* no file yet: use what is in memory */ }
+  } catch (e) { /* 文件不在就按内存里的跑 */ }
   if (!state) state = load()
   const now = Date.now()
   for (const j of state.jobs) {
@@ -180,7 +174,7 @@ export async function tick() {
     if (!Number(j.next_run)) {
       j.next_run = now + 45_000
     } else if (j.next_run < now - 2 * Math.max(60, Number(j.every) || 3600) * 1000) {
-      // Missed for too long: skip ahead instead of running a backlog.
+      // 错过太久只顺延，不补跑一串陈年任务
       j.next_run = nextRunFor(j, now)
     }
   }
@@ -189,7 +183,7 @@ export async function tick() {
     .filter((j) => j && j.enabled && !running.has(j.id) && (Number(j.next_run) || 0) <= now)
     .sort((a, b) => (a.next_run || 0) - (b.next_run || 0))
   if (!due.length) return []
-  const job = due[0] // one job per tick
+  const job = due[0] // 一拍只跑一条
   await runJob(job, 'schedule')
   return [job.id]
 }
@@ -198,18 +192,18 @@ export function statusText() {
   if (!state) state = load()
   const now = Date.now()
   const lines = state.jobs.map((j) => {
-    const nxt = j.next_run ? new Date(j.next_run).toLocaleString(undefined, { hour12: false }) : '-'
-    const last = j.last_end ? new Date(j.last_end).toLocaleString(undefined, { hour12: false }) : '-'
+    const nxt = j.next_run ? new Date(j.next_run).toLocaleString('zh-CN', { hour12: false }) : '-'
+    const last = j.last_end ? new Date(j.last_end).toLocaleString('zh-CN', { hour12: false }) : '-'
     const everySec = Number(j.every)
     const atJob = !everySec && typeof j.at === 'string' && /^\d{1,2}:\d{2}$/.test(j.at)
     const span = Math.max(60, everySec || 3600) * 1000
-    // at means once a day; do not judge staleness by 2x the default hourly span.
+    // at 是每天跑一次，别拿 2×every（缺省 3600 秒）的 2 小时判超期，至少给 24 小时
     const staleAfter = atJob ? Math.max(2 * span, 24 * 3600 * 1000) : 2 * span
     const stale = j.enabled && j.last_end && now - j.last_end > staleAfter
-    return `${j.enabled ? '●' : '○'} ${String(j.id).padEnd(8)} ${String(j.last_status || 'never').padEnd(6)} last ${last}  next ${nxt}` +
-      (j.failures ? `  fails ${j.failures}` : '') + (stale ? '  WARN: overdue' : '')
+    return `${j.enabled ? '●' : '○'} ${String(j.id).padEnd(8)} ${String(j.last_status || 'never').padEnd(6)} 上次 ${last}  下次 ${nxt}` +
+      (j.failures ? `  连败 ${j.failures}` : '') + (stale ? '  ⚠ 超期未成功' : '')
   })
-  return `${state.jobs.length} jobs, ${running.size} running\n` + lines.join('\n')
+  return `共 ${state.jobs.length} 条，运行中 ${running.size} 条\n` + lines.join('\n')
 }
 
 const statusTool = defineTool({
@@ -223,12 +217,12 @@ const statusTool = defineTool({
 const runTool = defineTool({
   name: 'jobs_run',
   description: 'Run one job immediately by id (for testing). Returns its terminal status.',
-  parameters: { id: { type: 'string', required: true, description: 'job id, e.g. example' } },
+  parameters: { id: { type: 'string', required: true, description: 'job id, e.g. health' } },
   output: textOut,
   async execute(args) {
     const st = state || load()
     const job = st.jobs.find((j) => j.id === args.id)
-    if (!job) return { text: 'no such job: ' + args.id }
+    if (!job) return { text: '没有这个任务：' + args.id }
     const r = await runJob(job, 'manual')
     return { text: `${args.id}: ${r.status || 'skipped:' + r.skipped}` }
   },
@@ -238,7 +232,7 @@ export function apply(ctx) {
   state = load()
   ctx.tools.register(statusTool)
   ctx.tools.register(runTool)
-  // ctx.setInterval follows the plugin scope and is cleared on unload.
+  // ctx.setInterval 来自 timer 服务，作用域跟随插件：卸载时自动清，不用手工 clear
   const setInt = typeof ctx.setInterval === 'function' ? ctx.setInterval.bind(ctx) : setInterval
-  interval = setInt(() => { tick().catch(() => { /* never throw into the host */ }) }, TICK_MS)
+  interval = setInt(() => { tick().catch(() => { /* 不把异常抛给宿主 */ }) }, TICK_MS)
 }

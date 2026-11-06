@@ -1,28 +1,8 @@
 {
-  "name": "dshm-local-memory",
+  "name": "xiaomin-memory",
   "version": "0.1.0",
-  "description": "Local long-term memory as four agent tools over a user-supplied python backend (SQLite + FTS5).",
+  "description": "Xiaomin memory as four agent tools (bundled python backend)",
   "type": "module",
   "main": "index.js",
-  "exports": "./index.js",
-  "license": "MIT",
-  "keywords": [
-    "dsh-plugin",
-    "memory",
-    "sqlite",
-    "fts5",
-    "local-first"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Laixiaomin001/dshm-local-superagent.git",
-    "directory": "plugins/memory"
-  },
-  "files": [
-    "index.js",
-    "package.json"
-  ],
-  "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "*"
-  }
+  "exports": "./index.js"
 }

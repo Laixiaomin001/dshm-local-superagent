@@ -13,3 +13,9 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Credentials and private material must never be committed.
+凭证/
+.credentials.yaml
+*.key
+*.pem

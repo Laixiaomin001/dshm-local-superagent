@@ -1,0 +1,8 @@
+{
+  "name": "xiaomin-main-guard",
+  "version": "0.1.0",
+  "description": "Main session is read-only: deny write/edit/bash/python/move/publish/remove for top-level sessions; subagents pass.",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js"
+}

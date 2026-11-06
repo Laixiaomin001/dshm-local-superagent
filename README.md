@@ -1,168 +1,119 @@
 # dshm-local-superagent
 
-[English](README.en.md)
+DSHM（DeepSeek Harness，跑在鸿蒙 PC 上）的端侧增强层。
 
-不依赖 GitHub、不依赖任何在线仓库的本地 superagent 骨架。
+它把一次对话拆成两层：主会话只负责查、判、派，改文件、跑命令、装东西交给子会话或本地派单队列。外层是七个 DSHM 插件，负责把记忆、调度、守卫、素材收集接进宿主进程；内层是四个 Python 工具，管记忆库、向量、人格和每日整理。全部跑在一台机器上，账本放在 `~/Documents/小敏`。
 
-主会话派单 → 本地队列 → 进程内轮询 → 子会话 worker → 回报。链路里没有服务器、没有外网、没有常驻进程，只有本地 JSON 文件和一个跟随宿主启停的定时器。
+## 仓库内容
 
-## 它是什么
-
-三个 DSH 插件加四个命令行脚本，把「派活给子会话、查记忆、定时跑脚本」放到本机：
-
-1. 主会话调用 `delegate`，任务写成 `inbox/<id>.json`。
-2. 插件每 10 秒扫一次 inbox，认领文件，起一个独立子会话当 worker。
-3. worker 干完，结果写 `done/<id>.json`，再作为一条消息回到原会话。
-
-队列就是目录，状态就是文件。能 `ls`、能手改、能备份，不需要数据库或消息中间件。
-
-## 三个插件
-
-| 插件 | 工具 | 作用 |
-|---|---|---|
-| `dshm-local-delegate` | `delegate` / `delegate_status` | 本地派单队列；进程内轮询，起子会话 worker，回报结果 |
-| `dshm-local-memory` | `mem_search` / `mem_get` / `mem_store` / `mem_status` | 四个记忆入口；后端是短命 python 进程，单次有硬超时 |
-| `dshm-local-jobs` | `jobs_status` / `jobs_run` | 进程内调度器；JSON 任务表、硬超时、补跑、抖动、退避 |
-
-`delegate` 只看本地目录，不连仓库；`memory` 只调本地脚本，不访问网络；`jobs` 用 `spawn` 跑(argv 数组，不过 shell)，到点杀整个进程组。
-
-## 安装
-
-插件按 DSH 的 profile 布局放置：目录名即包名，宿主从 `profiles/ondevice/node_modules` 解析。
-
-```bash
-export DSH_HOME=<宿主的 home 目录>
-export CORE=<DSH 安装目录>
-
-for p in delegate memory jobs; do
-  dest="$DSH_HOME/profiles/ondevice/node_modules/dshm-local-$p"
-  cp -r "plugins/$p" "$dest"
-  mkdir -p "$dest/node_modules/@deepseek-ai"
-  ln -s "$CORE/node_modules/@deepseek-ai/dsh-tools" \
-        "$dest/node_modules/@deepseek-ai/dsh-tools"
-done
+```
+plugins/   七个 DSHM 插件，每个只有 index.js 和 package.json
+tools/     四个 Python 工具：mem.py / embed.py / persona.py / dream.py
+docs/      architecture.md / memory.md / prompt-rules.md / field-notes.md
+examples/  派单队列的走查和示例（历史文档，保留原样）
+CHANGES.md 这一版和上一版的差别
 ```
 
-在 `$DSH_HOME/cordis.patch.yml` 里登记（home 层）：
+**目录名和插件名不一样。** `plugins/memory` 里加载的插件名仍然是 `xiaomin-memory`，其余六个同理。目录用短名是为了在 `node_modules/` 里一眼认出来；插件名是运行时身份，七个都以 `xiaomin-` 开头，`cordis.patch.yml` 里写的是插件名，不是目录名。
 
-```yaml
-- insert:
-    - id: dshm-local-delegate
-      name: dshm-local-delegate
-    - id: dshm-local-memory
-      name: dshm-local-memory
-    - id: dshm-local-jobs
-      name: dshm-local-jobs
+## 七个插件
+
+| 目录 | 插件名 | 注入的服务 | 干什么 |
+|---|---|---|---|
+| `plugins/memory` | `xiaomin-memory` | `tools` | 注册 `mem_search` / `mem_get` / `mem_store` / `mem_status` 四个工具，每次调用起一个 15 秒硬超时的子进程去跑 `mem.py` |
+| `plugins/jobs` | `xiaomin-jobs` | `tools`、`timer` | 进程内调度器，60 秒一拍，任务表在 `运行/jobs.json`；给工具 `jobs_status`、`jobs_run` |
+| `plugins/delegate` | `xiaomin-delegate` | `tools`、`timer`、`agents`、`subagents` | 本地派单：任务落 `运行/派单/inbox`，插件每 10 秒轮一次，起一个子会话干活，干完把结果推回本会话；给工具 `delegate`、`delegate_status` |
+| `plugins/readonly-preset` | `xiaomin-readonly-preset` | `agentPresets` | 在运行时注册「只读主会话」preset：写和编辑工具关掉，保留子会话工具和压缩 |
+| `plugins/ctx-guard` | `xiaomin-ctx-guard` | `tools`、`agents`、`sessionProjections`、`timer` | 上下文压力到 60% 时往会话推一条提醒，每个会话只推一次 |
+| `plugins/main-guard` | `xiaomin-main-guard` | `tools` | 顶层会话调七个动手工具直接拒；带 `parentSession` 或 `origin=subagent` 的子会话放行 |
+| `plugins/sentinel` | `xiaomin-sentinel` | 无 | 每个回合把用户首句、助手结尾、工具调用和涉及文件攒成一行，追加到 `运行/待记/YYYYMMDD.jsonl` |
+
+## 料流水线
+
+```
+对话 ──sentinel──▶ 运行/待记/YYYYMMDD.jsonl ──dream 04:10──▶ 日报 + 索引 + 向量 + 运行/health.json
 ```
 
-重启宿主，工具面出现 `delegate`、`mem_search`、`jobs_status` 即装好。装不上就先删这段 patch 再启动，宿主不受影响。
+哨兵每回合落一行素材，单文件超过 512 KB 滚到 `-2`，原始 jsonl 只读不删。每天 04:10 调度器跑 `dream.py`：体检、重建索引、消费待记（读到第几行记在 `.consumed.json`）、补向量、写健康表。日报落在 `运行/待记/日报-YYYYMMDD.md`，健康表是后台是否正常的唯一凭据，`mem_status` 末尾会带一行。
 
-`memory` 插件只是适配层，后端是仓库里的 `tools/mem.py`：纯标准库，约定 `search|get|store|status|reindex` 子命令。默认从 `$LOCAL_SUPERAGENT_HOME/memory/mem.py` 加载，可用 `LOCAL_MEMORY_PY` 改路径。
+## 怎么装
+
+前置：DSHM 0.2.x 端侧宿主，Node 由宿主内置，Python 3.12 用宿主自带的那份（`/data/storage/el2/base/haps/entry/files/bin/python3`）。
+
+1. 把七个目录放进当前 profile 的 `node_modules`，目录名保留下面的短名：
+
+   ```
+   $DSH_HOME/profiles/ondevice/node_modules/memory
+   $DSH_HOME/profiles/ondevice/node_modules/jobs
+   $DSH_HOME/profiles/ondevice/node_modules/delegate
+   $DSH_HOME/profiles/ondevice/node_modules/readonly-preset
+   $DSH_HOME/profiles/ondevice/node_modules/ctx-guard
+   $DSH_HOME/profiles/ondevice/node_modules/main-guard
+   $DSH_HOME/profiles/ondevice/node_modules/sentinel
+   ```
+
+   目录名可以换，`cordis.patch.yml` 里的 `name` 必须是插件名。插件依赖宿主提供的 `@deepseek-ai/dsh-tools`，不用自己装。
+
+2. 在 `$DSH_HOME/cordis.patch.yml` 里插入七行：
+
+   ```yaml
+   - insert:
+       - id: xiaomin-memory
+         name: xiaomin-memory
+       - id: xiaomin-jobs
+         name: xiaomin-jobs
+       - id: xiaomin-delegate
+         name: xiaomin-delegate
+       - id: xiaomin-readonly-preset
+         name: xiaomin-readonly-preset
+       - id: xiaomin-ctx-guard
+         name: xiaomin-ctx-guard
+       - id: xiaomin-main-guard
+         name: xiaomin-main-guard
+       - id: xiaomin-sentinel
+         name: xiaomin-sentinel
+   ```
+
+3. 重启宿主。插件启动路径没有副作用：不 spawn、不探端口、不写文件，起不来只影响自己。
+
+4. 把 `tools/` 放到 `$XIAOMIN_MEM/工具/`（默认 `~/Documents/小敏/记忆机/工具/`），确保 `mem.py` 可执行。`plugins/memory/index.js` 里写死了 `mem.py` 和 `python3` 的绝对路径，换机器要改那两行。
+
+5. 第一次跑 `python3 tools/mem.py verify`，再跑 `python3 tools/dream.py`，看 `运行/health.json` 的 `ok`。
 
 ## 配置
 
-全部通过环境变量，默认值落在 `~/.local-superagent/`：
-
-| 变量 | 默认 | 用途 |
+| 环境变量 | 作用 | 默认 |
 |---|---|---|
-| `LOCAL_SUPERAGENT_HOME` | `~/.local-superagent` | 数据根目录 |
-| `LOCAL_SUPERAGENT_QUEUE` | `$HOME/delegate` | 派单队列 |
-| `LOCAL_SUPERAGENT_WORKSPACE` | `$HOME` | worker / 任务的默认工作目录 |
-| `LOCAL_SUPERAGENT_POLL_MS` | `10000` | 队列轮询间隔 |
-| `LOCAL_SUPERAGENT_WORKER_TIMEOUT_MS` | `1800000` | 单个 worker 的超时 |
-| `LOCAL_SUPERAGENT_JOBS_DIR` | `$HOME/jobs` | 任务表与运行流水 |
-| `LOCAL_SUPERAGENT_TICK_MS` | `60000` | 调度器节拍 |
-| `MEM_HOME` | 无（默认 `$HOME/memory`） | 记忆数据根目录，覆盖默认位置 |
-| `LOCAL_MEMORY_PY` | `$HOME/memory/mem.py` | 记忆后端路径 |
-| `LOCAL_SUPERAGENT_PYTHON` | `python3` | 解释器 |
-| `LOCAL_SUPERAGENT_ROUTINE` | `$HOME/routine.json` | 日常步骤表 |
-| `LOCAL_SUPERAGENT_SESSION_ID` | 无 | CLI 派单时的回报会话 |
-
-`tools/delegate.py` 是同一队列的命令行入口，`tools/daily.py` 按 `routine.json` 顺序跑步骤。两者的参数、配置格式和退出码写进 [docs/architecture.md](docs/architecture.md)。
-
-## 记忆系统
-
-本地 SQLite + FTS5：索引在 `index.db`，条目是两层 markdown（`flow/` 流水、`canon/` 正本）。中文按三字切片检索，两字走 `LIKE` 兜底；断网照查，不需要模型，也不需要向量库。
-
-四个工具和派单是一套：worker 看不到主会话的上下文，任务里要它查旧账，就让它调 `mem_search`；干完用 `mem_store` 写一条续点。worker 和主会话读同一个库，不经过网络。
-
-装的时候把后端放到插件默认位置，再建一次索引：
-
-```bash
-SUPERAGENT="${LOCAL_SUPERAGENT_HOME:-$HOME/.local-superagent}"
-mkdir -p "$SUPERAGENT/memory"
-cp tools/mem.py "$SUPERAGENT/memory/mem.py"
-python3 "$SUPERAGENT/memory/mem.py" reindex
-```
-
-不想放默认位置，安装时用 `LOCAL_MEMORY_PY=/path/to/mem.py` 指定后端。数据默认在 `$SUPERAGENT/memory/`，可用 `MEM_HOME` 覆盖。设计细节见 [docs/memory.md](docs/memory.md)。
-
-## 为什么本地
-
-断网可用。没有 API、没有仓库、没有 webhook，拔了网线照跑。
-
-数据不出机器。任务原文、worker 结果、记忆、运行流水都是本地文件。
-
-随宿主启停。没有 systemd、没有守护进程；宿主停了，队列留在磁盘，下次起来接着跑。
-
-可审计。每次运行追加 `runs.jsonl`，任务原文可以直接 `grep`。
-
-## 提示词
-
-只装插件不够用：没有提示词，主会话会自己动手，`python`、`terminal` 也还能绕过只读限制。要让「主会话只查、判、派」成立，得把这段规矩写进 `AGENTS.md`。原文和实测边界见 [docs/prompt-rules.md](docs/prompt-rules.md)。
-
-## 通用版与部署版
-
-仓库里的 `plugins/` 是通用版：队列根目录走 `LOCAL_SUPERAGENT_QUEUE`，默认 `~/.local-superagent/delegate`，插件名 `dshm-local-delegate`。
-
-真在一台机器上跑时，通常是复制一份到 profile 的 `node_modules/` 下改成部署版：队列路径写死成这台机器的固定目录（和 `tools/*.py` 共用同一个队列），插件名改成 profile 里登记的名字，通报文案换成本地语言。功能一样——线程记录、`delegate_reply`、四条约束、归档策略两边都有。
-
-**改的顺序**：先改部署版（profile 里正在跑的那份），验完再同步回仓库。反过来做，重启后加载的还是旧模块，看起来像"改了没生效"——这个坑踩过一次。
-
-## 现场手记
-
-在鸿蒙平板上把这套东西跑起来的过程、踩过的坑和架构图：[docs/field-notes.md](docs/field-notes.md)。
+| `XIAOMIN_MEM` | 调度器和插件认的记忆机根目录 | `~/Documents/小敏/记忆机` |
+| `XIAOMIN_TICK_MS` | 调度器 tick 间隔（毫秒） | `60000` |
+| `MEM_HOME` | `mem.py` 的根目录 | 同上 |
+| `MEM_TIMEOUT` | 单个记忆动作的硬超时（秒） | `8` |
+| `MEM_VERIFY_TIMEOUT` | `verify` 的超时（秒） | `120` |
+| `MEM_BACKUP_TIMEOUT` | 备份的超时（秒） | `300` |
+| `DSH_HOME` | 守卫找 `main-guard.off` 的目录，也是会话目录 | `/data/storage/el2/base/haps/entry/files/dsh/home` |
+| `DSHM_BAILIAN_KEY` | 百炼 key 文件路径 | `~/Documents/小敏/凭证/百炼.key` |
+| `DSHM_BAILIAN_URL` | 百炼 embeddings 接口 | `https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings` |
+| `DSHM_BAILIAN_MODEL` | 嵌入模型 | `text-embedding-v3` |
+| `DSHM_CA_FILE` | 端侧 CPython 的 CA 证书文件 | `/etc/ssl/certs/cacert.pem` |
 
 ## 已知限制
 
-单机。队列是本地目录，多台机器不共享，也没有远端副本。
+单机。所有路径按 `~/Documents/小敏` 写死，没有多租户，没有按用户隔离，换机器要改路径。
 
-无多租户。一个宿主一个队列，不区分调用者。
+git 端侧不可用。要推仓库只能走 GitHub API 或 `gh` CLI，仓库操作别指望本地 git。
 
-无权限层。能读写队列目录就能改任务，靠文件权限兜底。
+依赖百炼。检索的向量只有百炼一条通道，断网、没 key、超时都退纯 FTS，返回 `mode=fts` 和 `degraded_reason`，能查但语义召回会差一截。
 
-串行。调度器一拍只跑一条；delegate 的 worker 深度受宿主 `maxActiveSubagents` 限制。
+记忆库不是无状态服务。`mem.py` 用 sqlite + flock，同一台机器上并发写靠文件锁串行化，跨机器共享目录会坏。
 
-不自动重试派单。失败只记录原因，重派要人再发一次。
+急救包里有凭证。`急救.py pack` 会把 `凭证/`、`.credentials.yaml`、pem 一起打进去，那个包不能进仓库、不能外发。
 
-记忆是单机单文件。跨机器不同步；手改或批量导入文件后，要跑一次 `reindex` 才对齐。
+插件里写死的路径和本地约定（`运行/jobs.json`、`运行/派单`、`运行/待记`）是配套的，只装插件不铺目录，调度器会自己建目录，但任务表只有默认两条（体检、日备份），要 12 条得自己写 `jobs.json`。
 
-## 目录
+`ctx-guard` 的 `package.json` 描述还写着 70%，实际阈值是 60%，以代码为准。
 
-```
-dshm-local-superagent/
-├── README.md         中文
-├── README.en.md      英文
-├── LICENSE           MIT
-├── examples/
-│   ├── e2e.md        端到端验证步骤
-│   └── inbox.example.json
-├── plugins/
-│   ├── delegate/    index.js + package.json
-│   ├── memory/      index.js + package.json
-│   └── jobs/        index.js + package.json
-├── tools/
-│   ├── delegate.py
-│   ├── daily.py
-│   ├── mem.py
-│   └── persona.py
-├── docs/
-│   ├── architecture.md
-│   ├── memory.md
-│   └── prompt-rules.md
-└── .gitignore
-```
+没有测试，没有 CI。改完只能在本机跑一遍 `verify` 和 `dream.py` 看 `health.json`。
 
-## 许可
+## 来源
 
-MIT，见 [LICENSE](LICENSE)。
+代码从正在运行的那份 `profiles/ondevice/node_modules` 直接拷出，只保留 `index.js` 和 `package.json`，逻辑没动。`tools/` 四个文件按原样收进来，没有改写。

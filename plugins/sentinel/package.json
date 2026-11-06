@@ -1,0 +1,8 @@
+{
+  "name": "xiaomin-sentinel",
+  "version": "0.1.0",
+  "description": "Capture each turn's material into 记忆机/运行/待记/YYYYMMDD.jsonl",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js"
+}

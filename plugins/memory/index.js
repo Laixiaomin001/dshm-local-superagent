@@ -1,26 +1,21 @@
 /**
- * dshm-local-memory — four agent tools over a local memory store
- * (mem_search / mem_get / mem_store / mem_status).
+ * xiaomin-memory —— 把小敏的账做成 4 个工具（mem_search / mem_get / mem_store / mem_status）。
  *
- * Rules that keep the host responsive:
- *  · apply() only registers tools: no spawn, no port probing, no file writes
- *  · every call has a hard timeout; the child is SIGKILLed when it expires
- *  · output is capped by the backend (search 2 KB, get 8 KB)
+ * 铁律（见 文档/SUPERAGENT-合并架构-v1.md）：
+ *  · apply() 只注册工具：不 spawn、不探端口、不写文件 —— 启动路径零副作用
+ *  · 每次调用都带超时（15 秒），到点由 execFile 杀掉，不会“永远等”
+ *  · 返回体积有上限：search 由 mem.py 封顶 2KB，get 由 --max 封顶 8KB
  *
- * Backend: a short-lived, standard-library-only python script
- * (LOCAL_MEMORY_PY, default $LOCAL_SUPERAGENT_HOME/memory/mem.py).
+ * 后端：$MEM/工具_v2/mem.py（纯标准库 python，无常驻进程）
  */
 import { spawn } from 'node:child_process'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const name = 'dshm-local-memory'
+export const name = 'xiaomin-memory'
 export const inject = ['tools']
 
-const HOME = process.env.LOCAL_SUPERAGENT_HOME || join(homedir(), '.local-superagent')
-const MEM_PY = process.env.LOCAL_MEMORY_PY || join(HOME, 'memory', 'mem.py')
-const PY = process.env.LOCAL_SUPERAGENT_PYTHON || 'python3'
+const MEM_PY = '/storage/Users/currentUser/Documents/小敏/记忆机/工具/mem.py'
+const PY = '/data/storage/el2/base/haps/entry/files/bin/python3'
 
 function runOnce(args, timeoutMs) {
   return new Promise((resolve) => {
@@ -36,19 +31,19 @@ function runOnce(args, timeoutMs) {
     child.stderr.on('data', (d) => { if (err.length < 64 * 1024) err += String(d) })
     child.on('error', (e) => finish({ error: e }))
     child.on('close', (code) => finish({ code, out, err }))
-    // Hard timeout: SIGKILL, never let one call hang the session.
+    // 硬超时：到点 SIGKILL，绝不让一次调用挂住会话
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL') } catch (e) { /* ignore */ }
-      finish({ error: new Error('memory backend timed out after ' + timeoutMs + 'ms') })
+      finish({ error: new Error('记忆服务超时（' + timeoutMs + 'ms）') })
     }, timeoutMs)
   })
 }
 
 async function callMem(args, timeoutMs = 15000) {
   const r = await runOnce(args, timeoutMs)
-  if (r.error) throw new Error('memory backend failed: ' + String(r.error.message || r.error).slice(0, 600))
-  if (typeof r.out !== 'string') throw new Error('memory backend returned a non-string payload')
-  if (r.code !== 0) throw new Error('memory backend failed: ' + String(r.err || ('exit ' + r.code)).trim().slice(0, 600))
+  if (r.error) throw new Error('记忆服务失败：' + String(r.error.message || r.error).slice(0, 600))
+  if (typeof r.out !== 'string') throw new Error('记忆服务输出非字符串')
+  if (r.code !== 0) throw new Error('记忆服务失败：' + String(r.err || ('exit ' + r.code)).trim().slice(0, 600))
   return r.out.trim()
 }
 
@@ -56,14 +51,14 @@ const textOutput = {
   schema: {
     type: 'object',
     additionalProperties: false,
-    properties: { text: { type: 'string', required: true, description: 'Text output from the memory backend.' } },
+    properties: { text: { type: 'string', required: true, description: '记忆服务的文本输出。' } },
   },
   render: (_args, value) => [{ type: 'text', text: value.text }],
 }
 
 const searchTool = defineTool({
   name: 'mem_search',
-  description: 'Search the local long-term memory (flow ledger, FTS5). Returns at most 5 hits under 2 KB. Prefer it over reading the memory directory.',
+  description: 'Search Xiaomin\'s long-term memory (flow ledger, FTS5). Returns at most 5 hits under 2 KB. Prefer it over reading the memory directory.',
   parameters: {
     query: { type: 'string', required: true, description: 'Keywords. For Chinese use 3+ contiguous characters; the trigram index does not span punctuation.' },
     limit: { type: 'number', description: 'Max hits, 1-10, default 5.' },
@@ -80,7 +75,7 @@ const getTool = defineTool({
   name: 'mem_get',
   description: 'Read one memory record by its file name (as returned by mem_search). At most 8 KB; longer records are truncated with a notice.',
   parameters: {
-    name: { type: 'string', required: true, description: 'Record file name, e.g. 20260101_1200_example.md' },
+    name: { type: 'string', required: true, description: 'Record file name, e.g. 20261104_0518_继承开工.md' },
     max: { type: 'number', description: 'Byte cap, default 8000.' },
   },
   output: textOutput,
@@ -93,13 +88,13 @@ const getTool = defineTool({
 
 const storeTool = defineTool({
   name: 'mem_store',
-  description: 'Append one record to the local memory, with four fields: time, who, what was said, and a personal note. Atomic write; the index is updated in the same transaction.',
+  description: 'Append one record to Xiaomin\'s memory, with the same four fields as the old ledger (time, who, what was said, what I felt). Atomic write; index updated in the same transaction.',
   parameters: {
     title: { type: 'string', required: true, description: 'Short title of the record.' },
     said: { type: 'string', description: 'What the person said (verbatim or near).' },
-    heart: { type: 'string', description: 'A personal note about the record.' },
-    who: { type: 'string', description: 'Person, optional.' },
-    domain: { type: 'string', description: 'Domain tag, optional.' },
+    heart: { type: 'string', description: 'What I felt / my own note.' },
+    who: { type: 'string', description: 'Person, default 老丁.' },
+    domain: { type: 'string', description: 'Domain tag, default 6_工程与事故.' },
     dryRun: { type: 'boolean', description: 'Preview only, write nothing.' },
   },
   output: textOutput,
