@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""dispatch.py — 把工单投到远端执行器，本机断了它也照跑。
+"""dispatch.py — 把工单投到远端主机执行，本机断了它也照跑。
 
 工单格式沿用 queue.py 的 JSON，多两个字段：
-  target: "remote" | "local"
-  cmd:    在远端执行的 shell 命令
+  target: "tiangong" | "local"
+  cmd:    在远端主机上执行的 shell 命令
 
-远端连接从环境变量读，没配就只当本机队列用：
-  DISPATCH_SSH_HOST   ssh 目标，如 user@host
-  DISPATCH_SSH_KEY    私钥路径（可选，不填走 ssh-agent）
-  DISPATCH_WORK       远端工作目录，默认 ~/dsh-work
+连接信息全从环境变量读，不配就是本机队列：
+  DISPATCH_SSH_HOST  远端地址，例如 user@host
+  DISPATCH_SSH_KEY   私钥路径，默认 ~/.ssh/id_ed25519
+  DISPATCH_WORK      远端工作目录，默认 ~/work
 
 用法：
-  dispatch.py add --title T --task "..." --cmd "命令" [--cwd /root/work] [--timeout 秒]
+  dispatch.py add --title T --task "..." --cmd "命令" [--cwd 远端目录] [--timeout 秒]
   dispatch.py list
   dispatch.py run <id>      # 投到远端，nohup 起后台，记 pid
   dispatch.py poll <id>     # 查日志与 pid，完了就落 done/fail
@@ -29,13 +29,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-DSH_HOME = Path(os.environ.get('DSH_HOME', str(Path.home() / '.dsh')))
-HOME = Path(os.environ.get('CORE_HOME', str(DSH_HOME / 'agent-core')))
+HOME = Path(os.environ.get('CORE_HOME', str(Path.home() / '.dsh' / 'agent-core')))
 Q = HOME / 'queue'
 INBOX, RUNNING, DONE, STUCK = Q / 'inbox', Q / 'running', Q / 'done', Q / 'stuck'
-HOST = os.environ.get('DISPATCH_SSH_HOST', '').strip()
-KEY = os.environ.get('DISPATCH_SSH_KEY', '').strip()
-WORK = os.environ.get('DISPATCH_WORK', '~/dsh-work')
+KEY = os.environ.get('DISPATCH_SSH_KEY') or str(Path.home() / '.ssh' / 'id_ed25519')
+HOST = os.environ.get('DISPATCH_SSH_HOST', '')
+WORK = os.environ.get('DISPATCH_WORK') or str(Path.home() / 'work')
 
 # 没写 timeout 的老单按这个算；超时就杀掉并记 ok:false
 DEFAULT_TIMEOUT = 3600
@@ -49,13 +48,9 @@ def iso() -> str:
 
 
 def ssh(cmd: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    if not HOST:
-        raise RuntimeError('没配 DISPATCH_SSH_HOST，投不了远端')
-    argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
-    if KEY:
-        argv += ['-i', KEY]
-    argv += [HOST, cmd]
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-i', KEY, HOST, cmd],
+        capture_output=True, text=True, timeout=timeout)
 
 
 def ensure() -> None:
@@ -158,12 +153,15 @@ def cmd_list(a) -> int:
 
 
 def cmd_run(a) -> int:
+    if not HOST:
+        print('没配 DISPATCH_SSH_HOST，远端派单没启用')
+        return 2
     p = INBOX / f'{a.id}.json'
     if not p.exists():
         print(f'inbox 里没有 {a.id}')
         return 1
     rec = json.loads(p.read_text(encoding='utf-8'))
-    if rec.get('target') != 'remote':
+    if rec.get('target') != 'tiangong':
         print('这张单不是远端的，本机派给 subagent')
         return 2
     qid = rec['id']
@@ -192,6 +190,9 @@ def cmd_run(a) -> int:
 
 
 def cmd_poll(a) -> int:
+    if not HOST:
+        print('没配 DISPATCH_SSH_HOST，远端派单没启用')
+        return 2
     p = RUNNING / f'{a.id}.json'
     if not p.exists():
         print(f'没有在跑的 {a.id}')
@@ -243,7 +244,7 @@ def main() -> int:
     ad.add_argument('--cmd', required=True)
     ad.add_argument('--cwd', default='')
     ad.add_argument('--timeout', type=int, default=0, help='超时秒数，默认 %d' % DEFAULT_TIMEOUT)
-    ad.add_argument('--target', default='remote', choices=['remote', 'local'])
+    ad.add_argument('--target', default='tiangong', choices=['tiangong', 'local'])
     ad.set_defaults(fn=cmd_add)
     sub.add_parser('list').set_defaults(fn=cmd_list)
     rn = sub.add_parser('run')

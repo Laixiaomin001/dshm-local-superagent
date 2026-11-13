@@ -2,6 +2,17 @@
 
 日期是里程碑，只标架构上的转折，不列逐次修补。
 
+## 2026-11-13 · 第三版（发布版）
+
+按现役版本重新生成，不再保留骨架。
+
+- 插件层：guard 的边界策略改从 `$CORE_HOME/policy.json` 读，读坏了退回内置默认；ctx-guard 增加 dream 补跑提醒、子会话轮转与超量清理、接续卡每回合更新（环形三行）；delegate 的认领和心跳统一走 `queue.py claim/heartbeat`，插件不再自己 rename 或写心跳
+- 新增 `protocol/`：`queue.schema.json` 是字段与状态机唯一出处，`validate.py` 只用标准库校验，`INTEGRATION.md` 列 queue.py 的接入点
+- 新增 `tools/lib/`：`paths.py`、`timeutil.py`、`io.py` 三份公共实现，路径全从 `CORE_HOME`/`DSH_HOME` 展开
+- 新增 `tools/ledger.py`（派单台账）、`tools/voice.py`（远端 TTS，默认不启用）；删掉已被插件取代的 `tools/guard.py`
+- 新增 `tests/`：`test_queue.py`、`test_recall.py`，各自在临时 `CORE_HOME` 里跑
+- 远端派单的连接信息全改环境变量，`target` 枚举统一为 `tiangong`；发布版不含任何主机地址、私钥文件名或人名
+
 ## 2026-11-11 · 第二版
 
 队列单轨、任务号与续做、验收打回、幂等键、事实卡置信度、常驻记忆层、口吻自检。

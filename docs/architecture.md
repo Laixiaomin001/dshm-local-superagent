@@ -29,7 +29,7 @@ $DSH_HOME/
 ├── sessions/                 宿主写的会话日志，只读
 ├── exports/                  人可读导出与快照
 └── agent-core/
-    ├── bin/                  十三个脚本 + unzstd.mjs
+    ├── bin/                  十四个脚本 + unzstd.mjs + lib/
     ├── memory/
     │   ├── 常驻.md           每轮先读的一页，recall.py 生成，别手改
     │   ├── 流水/             正本，一件一事
@@ -41,9 +41,11 @@ $DSH_HOME/
     │   └── 状态.json         件数、最后写入、续点
     ├── queue/                inbox / running / done / stuck，插件和命令行共用
     ├── 运行/                 哨兵偏移、口吻自检、教训、待审、报告
-    ├── policy.json           guard.py 的边界策略
+    ├── policy.json           guard 插件的边界策略
     └── health.json           后台是否正常的唯一凭据
 ```
+
+本仓源码里，脚本在 `tools/`、公共模块在 `tools/lib/`；`protocol/` 是队列单校验层，`tests/` 是回归用例。安装位置见 README。
 
 ## 模块清单
 
@@ -54,7 +56,7 @@ $DSH_HOME/
 | `recall.py` | 常驻层，把续点/待办/用户事实/教训压成一页 | `memory/常驻.md` |
 | `queue.py` | 本地派单队列：认领、心跳、验收、打回、续做 | `queue/` |
 | `dispatch.py` | 投远端执行，收日志和退出码 | `queue/` + 远端 |
-| `guard.py` | 路径和命令的边界判定 | `运行/guard.jsonl` |
+| `plugins/guard` | 边界策略、命令白名单、派单上账 | `运行/guard.jsonl`、`运行/派单台账/` |
 | `sentinel.py` | 扫会话日志，按回合补进待记 | `memory/待记/`、`运行/sentinel.json` |
 | `vectors.py` | 嵌入、余弦召回、RRF 的一路候选 | `memory/向量.jsonl` |
 | `style.py` | 口吻基线 | `运行/口吻基线.json` |
@@ -62,6 +64,7 @@ $DSH_HOME/
 | `usage.py` | 会话日志的 token 与花费估算 | 只看不写 |
 | `ctx.py` | 量上下文占用，给闸门用 | 只看不写 |
 | `eval.py` | recall@5 / MRR 回归 | 只看不写 |
+| `protocol/validate.py` | 队列单字段与状态校验 | `queue/`（只读） |
 | `plugins/ctx-guard/tone.js` | 口吻自检：禁词、句长、空泛 | `运行/口吻自检.jsonl` |
 
 ## 部件怎么咬合
@@ -72,7 +75,7 @@ $DSH_HOME/
 
 一次换页：占用到 60% → 写续点（卡在哪、下一步、必须知道的参数）→ 把这一页的判断落进流水和事实卡 → 开新页，新页开局先读 `memory/常驻.md`，再读状态里的续点。
 
-一天一次 `dream`，十二步，顺序固定：
+一天一次 `dream`，十三步，顺序固定：
 
 1. `reindex` 重建 FTS5 索引
 2. `sentinel` 收料
@@ -85,7 +88,8 @@ $DSH_HOME/
 9. `vectors` 全量重嵌
 10. `recall` 重建常驻页
 11. `doctor` 体检
-12. `backup` 快照
+12. `ledger` 台账分档
+13. `backup` 快照
 
 前面几步任何一步失败都记进 `steps`，不裸崩；子进程非 0 退出也算失败，不看 stdout 说没事。健康表整体标红，出问题能定位到具体一步。
 

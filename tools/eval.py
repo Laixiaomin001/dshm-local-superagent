@@ -72,7 +72,7 @@ def _pad(s: str, n: int) -> str:
 
 
 def evaluate(mode: str, queries: list[dict], jobs: int = 1) -> dict:
-    # 向量/混合每次独立请求，不再共用临时文件；
+    # 向量/混合现在各自独立请求、不再共用临时文件；
     # 仍串行跑，免得并发把 key 打成 429。FTS 全本地，可以并行。
     workers = max(1, jobs) if mode == 'fts' else 1
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -119,7 +119,7 @@ def main() -> int:
     ap.add_argument('--json', action='store_true', help='输出 JSON')
     ap.add_argument('--queries', default=str(QUERIES), help='查询集路径')
     ap.add_argument('--jobs', type=int, default=8,
-                    help='FTS 并行数；向量/混合强制串行（避免接口限流）')
+                    help='FTS 并行数；向量/混合强制串行（SSH 共用临时文件）')
     a = ap.parse_args()
 
     qpath = Path(a.queries)

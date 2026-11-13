@@ -1,0 +1,257 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-core/protocol/queue.schema.json",
+  "title": "队列单（queue order）协议",
+  "description": "queue/inbox|running|done|stuck 下一张单的字段与状态机。写入方：tools/queue.py、plugins/delegate/index.js、tools/dispatch.py。字段和状态只认这一份；本文件不是队列单。",
+  "type": "object",
+  "required": ["id", "title", "task", "created", "status"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z]-[a-z0-9]+-[a-z0-9]+$",
+      "description": "单号。queue.py 是 q-<base36时间>-<4位随机>，插件和 dispatch.py 是 d-<base36时间>-<4位随机>。文件名即 <id>.json。"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "一句话标题，给人看的。add 时必填。"
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "description": "完整任务正文。add 时必填，worker 只按这段干活。"
+    },
+    "cwd": {
+      "type": "string",
+      "description": "工作目录。缺省为空串（queue.py）或 DISPATCH_WORK（dispatch.py 缺省 ~/work）。"
+    },
+    "session": {
+      "type": "string",
+      "description": "投递/回报的目标会话 id。空串表示不回报。历史字段 sessionId 是它的旧名。"
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "入队时间。队列时间不能拿来判超时，判超时用 heartbeat/started。"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "done", "failed", "stale"],
+      "description": "状态机唯一出处。queued→running→done/failed；running→stale（sweep）；done/failed/stale→queued（reject --retry 或 resume）。"
+    },
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "幂等键。inbox/running 里同一 key 只允许一张；有 key 才写这个字段，没有就不写。"
+    },
+    "target": {
+      "type": "string",
+      "enum": ["tiangong", "local"],
+      "description": "执行地。dispatch.py 投远端的单写 tiangong；delegate 插件看到 target=tiangong 或带 cmd 的单不接。"
+    },
+    "cmd": {
+      "type": "string",
+      "minLength": 1,
+      "description": "要执行的 shell 命令（dispatch.py）。带这个字段的单由 dispatch.py 处理，delegate 插件不认领。"
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "已重跑次数。queue.py 上限 2（MAX_ATTEMPTS），到上限转人工；插件每落一次 done/stuck 加 1。"
+    },
+    "started": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "认领/开跑时间。status=running 时必填。"
+    },
+    "heartbeat": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "插件每 60 秒刷一次。sweep 用 heartbeat，没有才用 started，再没有用文件 mtime。"
+    },
+    "finished": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "收尾时间。status=done/failed/stale 时必填。历史字段 finishedAt 是它的旧名。"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "成功与否。done 必须 true，failed/stale 必须 false。只有布尔值，别写 'true' 字符串。"
+    },
+    "result": {
+      "type": "string",
+      "maxLength": 200000,
+      "description": "结果正文，两个写入方都截到 200000 字符。done 时必填（可以是空串）。历史字段 output 是它的旧名。"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "失败/超时原因，截到 2000 字符。failed/stale 时必填。"
+    },
+    "out": {
+      "type": "string",
+      "description": "产出文件路径（queue.py done --out）。没有就不写。"
+    },
+    "childId": {
+      "type": "string",
+      "description": "插件跑出来的子会话 id。人工 done 的单没有这个字段。"
+    },
+    "stopReason": {
+      "type": "string",
+      "description": "子会话停止原因，插件原样记（常见 completed、aborted，失败单为空串）。不做枚举，运行时可能出新值。"
+    },
+    "notified": {
+      "type": "boolean",
+      "description": "是否已把回执投给目标会话。插件写 done 时置 false，投递成功后改 true。"
+    },
+    "accepted": {
+      "type": "boolean",
+      "description": "主会话验收标记。只有 done 里的单能 accept；插件写新 done 时置 false。"
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "验收时间。accepted=true 时必填。"
+    },
+    "rejected": {
+      "type": "boolean",
+      "description": "打回标记。不带 --retry 时单留在原地，只记这个标记。"
+    },
+    "reject_reason": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "打回原因，截到 2000 字符。rejected=true 时必填。"
+    },
+    "rejected_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "打回时间。rejected=true 时必填。"
+    },
+    "parent": {
+      "type": "string",
+      "pattern": "^[a-z]-[a-z0-9]+-[a-z0-9]+$",
+      "description": "上一张单的 id。resume --task 造新单时写，用来串同一件事的后续。"
+    },
+    "worker": {
+      "type": "string",
+      "description": "谁认领的（queue.py claim --worker）。"
+    },
+    "pid": {
+      "type": ["string", "integer"],
+      "description": "远端主机上的进程号（dispatch.py）。按进程组杀，所以存成字符串也行。"
+    },
+    "log": {
+      "type": "string",
+      "description": "stdout 日志路径（dispatch.py）。"
+    },
+    "errlog": {
+      "type": "string",
+      "description": "stderr 日志路径（dispatch.py）。"
+    },
+    "exitlog": {
+      "type": "string",
+      "description": "退出码文件路径（dispatch.py），内容是 shell 的 $?。"
+    },
+    "exit": {
+      "type": "integer",
+      "description": "命令退出码（dispatch.py）。"
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "超时秒数（dispatch.py add --timeout）。"
+    },
+    "duplicate_of": {
+      "type": "string",
+      "pattern": "^[a-z]-[a-z0-9]+-[a-z0-9]+$",
+      "description": "同 key 判重时被作废的单记下先到的那张 id（插件 parkDuplicate 写 stuck）。"
+    },
+    "notify": {
+      "type": "boolean",
+      "description": "判重作废的单置 false，叫回执别打扰父会话。注意和 notified 不是一回事。"
+    },
+    "sessionId": {
+      "type": "string",
+      "description": "历史字段，session 的旧名。只读兼容：新写入一律写 session。"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "历史字段，created 的旧名。只读兼容。"
+    },
+    "finishedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$",
+      "description": "历史字段，finished 的旧名。只读兼容。"
+    },
+    "output": {
+      "type": "string",
+      "maxLength": 200000,
+      "description": "历史字段，result 的旧名。只读兼容。"
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "running"}}, "required": ["status"]},
+      "then": {"required": ["started"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "done"}}, "required": ["status"]},
+      "then": {
+        "required": ["ok", "finished", "result"],
+        "properties": {"ok": {"const": true}}
+      }
+    },
+    {
+      "if": {"properties": {"status": {"enum": ["failed", "stale"]}}, "required": ["status"]},
+      "then": {
+        "required": ["ok", "reason", "finished"],
+        "properties": {"ok": {"const": false}}
+      }
+    },
+    {
+      "if": {"properties": {"accepted": {"const": true}}, "required": ["accepted"]},
+      "then": {"required": ["accepted_at"]}
+    },
+    {
+      "if": {"properties": {"rejected": {"const": true}}, "required": ["rejected"]},
+      "then": {"required": ["reject_reason", "rejected_at"]}
+    },
+    {
+      "if": {"properties": {"target": {"const": "tiangong"}}, "required": ["target"]},
+      "then": {"required": ["cmd"]}
+    }
+  ],
+  "x-state-machine": {
+    "description": "状态机唯一出处。validate_status_transition 直接读这里的 transitions，不在 Python 里另抄一份。",
+    "initial": "queued",
+    "statuses": ["queued", "running", "done", "failed", "stale"],
+    "transitions": {
+      "queued": ["running", "failed"],
+      "running": ["done", "failed", "stale", "queued"],
+      "done": ["queued"],
+      "failed": ["queued"],
+      "stale": ["queued"]
+    },
+    "causes": {
+      "queued->running": "queue.py claim / 插件认领",
+      "queued->failed": "queue.py fail（inbox 里的单直接判失败）",
+      "running->done": "queue.py done / 插件 writeDone / dispatch.py poll 成功",
+      "running->failed": "queue.py fail / 插件 writeStuck / dispatch.py poll 失败",
+      "running->stale": "queue.py sweep 心跳超时",
+      "running->queued": "queue.py reject --retry（人工打回在跑的单，少见）",
+      "done->queued": "queue.py reject --retry 或 resume",
+      "failed->queued": "queue.py reject --retry 或 resume",
+      "stale->queued": "queue.py resume"
+    },
+    "same_state_allowed": true
+  }
+}

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""vectors.py — 语义召回，直连 OpenAI 兼容的 embeddings 接口。
+"""vectors.py — 账本的语义召回，直连嵌入接口。
 
-索引与查询同模型同维度，绝不混算。
+索引与查询同模型 text-embedding-v3（1024 维），绝不混算。
 数据：memory/向量.jsonl，一行一件 {file, sha1, model, dim, v}。
-接口地址与 key 都从环境变量读：EMBED_BASE_URL、EMBED_API_KEY（或 EMBED_API_KEY_FILE 指向的文件）。
+模型接口：OpenAI 兼容的 /v1/embeddings，key 从 EMBED_API_KEY_FILE 指向的文件读
+（默认 ~/.dsh/private/embed.key）。
 
 用法：
   vectors.py rebuild          # 全量重嵌（17 件也只要几秒）
@@ -16,8 +17,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
+import math
 import socket
 import sys
 import time
@@ -28,39 +29,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core import HOME, FLOW, DB, parse_flow, connect  # noqa: E402
 
-DSH_HOME = Path(os.environ.get('DSH_HOME', str(Path.home() / '.dsh')))
-KEY_FILE = Path(os.environ.get('EMBED_API_KEY_FILE', str(DSH_HOME / 'private' / 'embedding.key')))
-URL = os.environ.get('EMBED_BASE_URL', 'https://api.example.com/v1/embeddings')
-MODEL = os.environ.get('EMBED_MODEL', 'text-embedding-v3')
-DIM = int(os.environ.get('EMBED_DIM', '1024'))
-BATCH = 10           # 单批上限 10 条
+KEY_FILE = Path(os.environ.get('EMBED_API_KEY_FILE')
+                or (Path.home() / '.dsh' / 'private' / 'embed.key'))
+URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings'
+MODEL = 'text-embedding-v3'
+DIM = 1024
+BATCH = 10           # 接口单次上限 10 条
 TIMEOUT = 20         # 秒
 VEC = HOME / 'memory' / '向量.jsonl'
 K = 60
 
 
-SCHEME = 'Bearer'  # HTTP 认证方案名，凭证本身从环境变量或文件读
-
-
 def _read_key() -> str:
-    key = os.environ.get('EMBED_API_KEY', '').strip()
-    if key:
-        return key
     try:
-        key = KEY_FILE.read_text(encoding='utf-8').strip()
+        key = Path(KEY_FILE).read_text(encoding='utf-8').strip()
     except FileNotFoundError:
-        raise RuntimeError(f'找不到 embedding key：{KEY_FILE}') from None
+        raise RuntimeError(f'找不到嵌入接口 key：{KEY_FILE}') from None
     except OSError as e:
-        raise RuntimeError(f'读不到 embedding key：{KEY_FILE}（{e.strerror or e}）') from None
+        raise RuntimeError(f'读不到嵌入接口 key：{KEY_FILE}（{e.strerror or e}）') from None
     if not key:
-        raise RuntimeError(f'embedding key 是空的：{KEY_FILE}')
+        raise RuntimeError(f'嵌入接口 key 是空的：{KEY_FILE}')
     return key
 
 
 def _post(batch: list[str], key: str) -> list[list[float]]:
     body = json.dumps({'model': MODEL, 'input': batch, 'encoding_format': 'float'}).encode('utf-8')
     req = urllib.request.Request(URL, data=body, method='POST', headers={
-        'Authorization': f'{SCHEME} {key}',
+        'Authorization': 'Bearer ' + key,
         'Content-Type': 'application/json',
     })
     try:
@@ -72,25 +67,25 @@ def _post(batch: list[str], key: str) -> list[list[float]]:
         except Exception:
             pass
         if e.code == 401:
-            raise RuntimeError(f'embeddings 401：key 无效或无权限（{KEY_FILE}）{detail}') from None
+            raise RuntimeError(f'嵌入接口 401：key 无效或无权限（{KEY_FILE}）{detail}') from None
         if e.code == 403:
-            raise RuntimeError(f'embeddings 403：key 无该模型权限或服务未开通 {detail}') from None
+            raise RuntimeError(f'嵌入接口 403：key 无该模型权限或服务未开通 {detail}') from None
         if e.code == 429:
-            raise RuntimeError(f'embeddings 429：限流，稍后再试 {detail}') from None
-        raise RuntimeError(f'embeddings HTTP {e.code}：{detail}') from None
+            raise RuntimeError(f'嵌入接口 429：限流，稍后再试 {detail}') from None
+        raise RuntimeError(f'嵌入接口 HTTP {e.code}：{detail}') from None
     except (socket.timeout, TimeoutError):
-        raise RuntimeError(f'embeddings 超时：{TIMEOUT} 秒没响应，查网络') from None
+        raise RuntimeError(f'嵌入接口超时：{TIMEOUT} 秒没响应，查网络') from None
     except urllib.error.URLError as e:
-        raise RuntimeError(f'embeddings 连不上：{e.reason}') from None
+        raise RuntimeError(f'嵌入接口连不上：{e.reason}') from None
     except OSError as e:
-        raise RuntimeError(f'embeddings 网络错误：{e}') from None
+        raise RuntimeError(f'嵌入接口网络错误：{e}') from None
 
     try:
         d = json.loads(raw)
     except ValueError:
-        raise RuntimeError(f'embeddings 返回不是 JSON：{raw[:120]!r}') from None
+        raise RuntimeError(f'嵌入接口返回不是 JSON：{raw[:120]!r}') from None
     if 'data' not in d:
-        raise RuntimeError(f'embeddings 返回异常：{str(d)[:200]}')
+        raise RuntimeError(f'嵌入接口返回异常：{str(d)[:200]}')
     rows = sorted(d['data'], key=lambda x: x.get('index', 0))
     out = []
     for r in rows:
@@ -102,7 +97,7 @@ def _post(batch: list[str], key: str) -> list[list[float]]:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """批量嵌入，10 条一批，失败重试一次；返回与输入同序。"""
+    """直连嵌入接口批量嵌，10 条一批，失败重试一次；返回与输入同序。"""
     if not texts:
         return []
     key = _read_key()

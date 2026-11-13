@@ -7,8 +7,9 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
-const HOME = process.env.CORE_HOME || join(DSH_HOME, 'agent-core')
-export const TONE_LOG = process.env.TONE_LOG || join(HOME, '运行', '口吻自检.jsonl')
+const CORE_HOME = process.env.CORE_HOME || join(DSH_HOME, 'agent-core')
+
+export const TONE_LOG = join(CORE_HOME, '运行', '口吻自检.jsonl')
 export const DAILY_MAX = 500
 export const AVG_SENT_MAX = 45
 

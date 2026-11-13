@@ -14,15 +14,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-DSH_HOME = Path(os.environ.get("DSH_HOME", str(Path.home() / ".dsh")))
-SESSIONS_ROOT = DSH_HOME / "sessions"
+from lib.paths import SESSIONS as SESSIONS_ROOT
+from lib.timeutil import local_iso
+
 LOG_NAME = "session.v4.jsonl.zstd"
 
 # node 一次读多个日志，只回元数据，避免把整段对话灌进 python。
@@ -225,7 +225,7 @@ def fmt(sess: Session) -> str:
 def iso_time(ms: int | None) -> str | None:
     if not ms:
         return None
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+    return local_iso(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
 
 
 def as_json(sess: Session) -> dict:

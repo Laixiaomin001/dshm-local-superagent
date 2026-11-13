@@ -21,8 +21,15 @@ const POLL_MS = 10 * 1000
 const HEARTBEAT_MS = 60 * 1000
 const WORKER_TIMEOUT_MS = Number(process.env.DELEGATE_TIMEOUT_MS || 30 * 60 * 1000)
 const KEEP_DONE = 200
-const RESULT_TEXT_CAP = Number(process.env.DELEGATE_TEXT_CAP || 400)
+// 回执正文上限：DELEGATE_RESULT_CAP（老名字 DELEGATE_TEXT_CAP 仍认），默认 400 字。
+// 全文不受影响，done/<id>.json 里最多 200000 字，回执末尾给路径。
+const RESULT_TEXT_CAP = (() => {
+  const n = Number(process.env.DELEGATE_RESULT_CAP || process.env.DELEGATE_TEXT_CAP || 400)
+  return Number.isFinite(n) && n > 0 ? n : 400
+})()
 const QUEUE_PY = join(DSH_HOME, 'agent-core', 'bin', 'queue.py')
+const CORE_HOME = join(DSH_HOME, 'agent-core')
+const PYTHON = process.env.DELEGATE_PYTHON || 'python3'
 
 const textOutput = {
   schema: {
@@ -91,43 +98,33 @@ function statusOf(rec, dir) {
   return 'queued'
 }
 
-// dispatch.py 投给远端的单：target=remote，或带 cmd。delegate 不接，留在 inbox 给 dispatch.py。
+// dispatch.py 投给远端的单：target=tiangong，或带 cmd。delegate 不接，留在 inbox 给 dispatch.py。
 function shouldSkip(rec) {
   if (!rec || typeof rec !== 'object') return false
-  if (rec.target === 'remote') return true
+  if (rec.target === 'tiangong') return true
   if (Object.prototype.hasOwnProperty.call(rec, 'cmd')) return true
   return false
 }
 
-// 正在跑的 key -> id。同键的另一张只认已经在跑的那张，不再抢。
-function runningKeyMap() {
-  const out = new Map()
-  let files = []
-  try { files = readdirSync(RUNNING).filter((f) => f.endsWith('.json')) } catch (e) { return out }
-  for (const f of files) {
-    try {
-      const rec = JSON.parse(readFileSync(join(RUNNING, f), 'utf8'))
-      const key = String((rec && rec.key) || '').trim()
-      if (key) out.set(key, rec.id || f.replace(/\.json$/, ''))
-    } catch (e) { /* 心跳正写到一半就跳过，下一轮再看 */ }
-  }
-  return out
-}
+// 前面这里有过两份认领逻辑：runningKeyMap 自己扫 running 判同 key，
+// parkDuplicate 自己把同批重复单挪 stuck。queue.py claim 已经在做同一件事
+// （判 key、判 running 同名单、rename、写 started/status），这里再判一次就是
+// 第二份实现，两边一旦改法不同就会出现「插件认了、队列说没认」。
+// 删掉它们，认领胜负只看 claim 的退出码；重复单留在 inbox，claim 非 0 就不跑。
 
-// 同一批 inbox 里同 key 的第二张：作废，挪到 stuck 并记下它重复的是哪张。
-function parkDuplicate(fileName, rec, firstId) {
-  const out = {
-    ...rec,
-    ok: false,
-    status: 'failed',
-    reason: 'duplicate_of ' + firstId,
-    duplicate_of: firstId,
-    finished: nowIso(),
-  }
+// 认领和心跳都只走 queue.py，插件不再碰 running 文件。
+// 0 才算认领到；非 0 表示同 key 已在跑或已被别的进程抢走，下一轮再看。
+function queueCli(args) {
   try {
-    writeFileSync(join(STUCK, fileName), JSON.stringify(out, null, 2))
-  } catch (e) { return }  // 写不进去就留在 inbox，下一轮还会再判
-  try { unlinkSync(join(INBOX, fileName)) } catch (e) { /* ignore */ }
+    execFileSync(PYTHON, [QUEUE_PY, ...args], {
+      encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, CORE_HOME },
+    })
+    return true
+  } catch (e) {
+    return false
+  }
 }
 
 function workerPrompt(rec) {
@@ -211,9 +208,22 @@ export function apply(ctx) {
     } catch (e) { /* ignore */ }
   }
 
-  function writeDone(rec, extra) {
+  // 老的 sessionId/createdAt/finishedAt/output 不再写，只留 queue.py 那套字段；
+  // 已经写进 payload 的旧字段照原样留着（读的时候 normalize 两套都认）。
+  function stripLegacy(out) {
+    for (const k of ['sessionId', 'createdAt', 'finishedAt', 'output']) delete out[k]
+    return out
+  }
+
+  function finishBase(rec, extra) {
     const out = { ...rec, ...extra, finished: nowIso(), attempts: (Number(rec.attempts) || 0) + 1 }
-    out.status = out.ok === false ? 'failed' : 'done'
+    return stripLegacy(out)
+  }
+
+  function writeDone(rec, extra) {
+    const out = finishBase(rec, extra)
+    out.ok = true
+    out.status = 'done'
     // 执行者说完成不算数，等主会话验收；打回重跑的新一轮也没验过
     out.accepted = false
     delete out.accepted_at
@@ -221,7 +231,6 @@ export function apply(ctx) {
     delete out.rejected
     delete out.reject_reason
     delete out.rejected_at
-    for (const k of ['sessionId', 'createdAt', 'finishedAt', 'output']) delete out[k]
     if (out.result == null) out.result = ''
     try {
       writeFileSync(join(DONE, rec.id + '.json'), JSON.stringify(out, null, 2))
@@ -229,19 +238,25 @@ export function apply(ctx) {
     pruneDone()
   }
 
-  async function runOne(rec, runningPath) {
-    // 认领时落 started，之后每 60 秒更新 heartbeat；都写在 running 文件里，完成时进 done。
-    const startedIso = nowIso()
-    const live = { ...rec, started: startedIso, heartbeat: startedIso, status: 'running' }
+  // 失败不再混进 done：queue.py / doctor / sweep 都按 stuck 认失败单。
+  function writeStuck(rec, extra) {
+    const out = finishBase(rec, extra)
+    out.ok = false
+    out.status = 'failed'
+    out.reason = String(out.reason == null ? '' : out.reason).slice(0, 2000)
+    try {
+      writeFileSync(join(STUCK, rec.id + '.json'), JSON.stringify(out, null, 2))
+    } catch (e) { /* ignore */ }
+  }
+
+  async function runOne(rec, runningPath, queueId) {
+    // 认领、started、status:running 都由 queue.py claim 写好；这里只起会话。
+    // 心跳不再改 running 文件（那会跟 queue.py 抢同一张单），改成每 60 秒调 heartbeat 子命令。
     let finished = false
     const beat = () => {
       if (finished) return
-      try {
-        live.heartbeat = nowIso()
-        writeFileSync(runningPath, JSON.stringify(live, null, 2))
-      } catch (e) { /* ignore */ }
+      queueCli(['heartbeat', queueId])
     }
-    try { writeFileSync(runningPath, JSON.stringify(live, null, 2)) } catch (e) { /* ignore */ }
     let tick
     try { tick = ctx.setInterval(beat, HEARTBEAT_MS) } catch (e) { tick = undefined }
     const stopBeat = () => {
@@ -257,7 +272,7 @@ export function apply(ctx) {
     try {
       const agent = liveAgent(rec.sessionId)
       if (!agent) {
-        writeDone(live, { ok: false, reason: 'session-not-live' })
+        writeStuck(rec, { reason: 'session-not-live' })
         return
       }
       let started
@@ -270,22 +285,25 @@ export function apply(ctx) {
             prompt: [{ type: 'text', text: workerPrompt(rec) }],
             parent: agent,
             cwd: rec.cwd || DEFAULT_CWD,
+            // 不继承父会话预设：主会话可能是 readonly，worker 继承过去就只会查不会写。
+            // 跟 readonly-preset 里的 tool-subagent 配置对齐，一律用 standard。
+            agentPreset: 'standard',
           },
           signal: AbortSignal.timeout(WORKER_TIMEOUT_MS),
         })
       } catch (error) {
-        writeDone(live, { ok: false, reason: 'start-failed: ' + String((error && error.message) || error).slice(0, 400) })
+        writeStuck(rec, { reason: 'start-failed: ' + String((error && error.message) || error).slice(0, 400) })
         return
       }
       let result
       try {
         result = await started.result
       } catch (error) {
-        writeDone(live, { ok: false, reason: 'run-failed: ' + String((error && error.message) || error).slice(0, 400) })
+        writeStuck(rec, { reason: 'run-failed: ' + String((error && error.message) || error).slice(0, 400) })
         return
       }
       const output = extractText(result)
-      writeDone(live, { ok: true, childId: started.childId, stopReason: (result && result.stopReason) || '', result: String(output).slice(0, 200000), notified: false })
+      writeDone(rec, { childId: started.childId, stopReason: (result && result.stopReason) || '', result: String(output).slice(0, 200000), notified: false })
     } finally {
       stopBeat()
       // 完成/失败都在这里收掉 running，不再等外层 .then()；.then() 里那次保留也无害
@@ -293,21 +311,22 @@ export function apply(ctx) {
     }
   }
 
-  function formatNotice(rec) {
-    const head = '【派单完成】' + (rec.title || rec.id)
+  function formatNotice(rec, where) {
+    const dir = where === 'stuck' ? STUCK : DONE
+    const head = (rec.ok === false ? '【派单未完成】' : '【派单完成】') + (rec.title || rec.id)
     const body = String(rec.result || rec.output || rec.reason || '').slice(0, RESULT_TEXT_CAP)
-    const tail = '\n\n全文在 ' + join(DONE, rec.id + '.json')
+    const tail = '\n\n全文在 ' + join(dir, rec.id + '.json')
     return head + '\n' + body + tail
   }
 
-  function tryNotify(rec) {
+  function tryNotify(rec, where) {
     const agent = liveAgent(rec.sessionId)
     if (!agent) return 'no-agent'
     if (agent.status !== 'idle') return 'busy'
     const message = {
       id: randomUUID(),
       role: 'user',
-      content: [{ type: 'text', text: formatNotice(rec) }],
+      content: [{ type: 'text', text: formatNotice(rec, where) }],
       source: { kind: 'user' },
     }
     try {
@@ -318,18 +337,24 @@ export function apply(ctx) {
     }
   }
 
+  // 失败单也要回执：失败写在 stuck，扫 done 的写法会把失败静默吞掉。
   function notifyPending() {
-    let files = []
-    try { files = readdirSync(DONE).filter((f) => f.endsWith('.json')) } catch (e) { return }
-    for (const f of files) {
-      const p = join(DONE, f)
-      let rec
-      try { rec = normalize(JSON.parse(readFileSync(p, 'utf8'))) } catch (e) { continue }
-      if (!rec || rec.notified === true) continue
-      const state = tryNotify(rec)
-      if (state === 'ok' || state === 'failed') {
-        rec.notified = true
-        try { writeFileSync(p, JSON.stringify(rec, null, 2)) } catch (e) { /* ignore */ }
+    for (const [where, dir] of [['done', DONE], ['stuck', STUCK]]) {
+      let files = []
+      try { files = readdirSync(dir).filter((f) => f.endsWith('.json')) } catch (e) { continue }
+      for (const f of files) {
+        const p = join(dir, f)
+        let raw
+        try { raw = JSON.parse(readFileSync(p, 'utf8')) } catch (e) { continue }
+        const rec = normalize(raw)
+        if (!rec || rec.notified === true) continue
+        // 判重作废的单带了 notify:false，不用打扰父会话
+        if (rec.notify === false) continue
+        const state = tryNotify(rec, where)
+        if (state === 'ok' || state === 'failed') {
+          raw.notified = true
+          try { writeFileSync(p, JSON.stringify(raw, null, 2)) } catch (e) { /* ignore */ }
+        }
       }
     }
   }
@@ -338,12 +363,10 @@ export function apply(ctx) {
     if (disposed) return
     try {
       ensureDirs()
-      // 这一轮开始时已经在跑的 key；本轮新认领的另记，用于分辨 inbox 里的重复投递
-      const runningKeys = runningKeyMap()
-      const claimedKeys = new Map()
       const files = readdirSync(INBOX).filter((f) => f.endsWith('.json')).sort()
       for (const f of files) {
         const p = join(INBOX, f)
+        const queueId = f.replace(/\.json$/, '')
         let raw
         try {
           raw = JSON.parse(readFileSync(p, 'utf8'))
@@ -352,27 +375,30 @@ export function apply(ctx) {
           continue
         }
         const rec = normalize(raw)
-        // 先判归属，再 rename：远端的单原样留在 inbox，dispatch.py 还能捡
+        if (!rec.id) rec.id = queueId
+        // 先判归属再认领：远端的单原样留在 inbox，dispatch.py 还能捡
         if (shouldSkip(rec)) continue
-        if (!rec.id) rec.id = f.replace(/\.json$/, '')
-        const key = String(rec.key || '').trim()
-        // 同一批 inbox 里同 key 的第二张：只认第一张，这张作废
-        if (key && claimedKeys.has(key)) {
-          parkDuplicate(f, rec, claimedKeys.get(key))
+        // 没有 task 的单认不了：认了只会起一个空活，挪进 stuck 等人看
+        if (!String(rec.task || '').trim()) {
+          writeStuck(rec, { reason: 'no-task: 单里没有 task，格式不认识' })
+          if (existsSync(join(STUCK, rec.id + '.json'))) {
+            try { unlinkSync(p) } catch (e) { /* ignore */ }
+          }
           continue
         }
-        // 同键的另一张已经在跑：不抢，留在 inbox 等它结束
-        if (key && runningKeys.has(key)) continue
+        // 认领只认 queue.py 的退出码：0 才是这张单的，非 0（同 key 在跑、已被别人抢）
+        // 就跳过，单留在 inbox，下一轮再看。
+        if (!queueCli(['claim', queueId, '--worker', 'delegate'])) continue
         const runningPath = join(RUNNING, f)
-        // running 里已有同名单（崩溃残留）就不抢，跟 queue.py claim 的检查一致
-        if (existsSync(runningPath)) continue
+        let claimed
         try {
-          renameSync(p, runningPath)
+          claimed = normalize(JSON.parse(readFileSync(runningPath, 'utf8')))
         } catch (e) {
-          continue
+          // claim 已成功但读不回 running：拿 inbox 的单先跑，started 用当前时间兜底
+          claimed = { ...rec, status: 'running', started: nowIso() }
         }
-        if (key) claimedKeys.set(key, rec.id)
-        runOne(rec, runningPath)
+        if (!claimed.id) claimed.id = queueId
+        runOne(claimed, runningPath, queueId)
           .catch(() => {})
           .then(() => {
             try { unlinkSync(runningPath) } catch (e) { /* ignore */ }
@@ -510,11 +536,10 @@ export function apply(ctx) {
     async execute(args) {
       const id = String((args && args.id) || '').trim()
       if (!id) return { text: '[error] id 不能为空' }
-      const py = process.env.DELEGATE_PYTHON || 'python3'
       try {
-        const out = execFileSync(py, [QUEUE_PY, 'accept', id], {
+        const out = execFileSync(PYTHON, [QUEUE_PY, 'accept', id], {
           encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, CORE_HOME: join(DSH_HOME, 'agent-core') },
+          env: { ...process.env, CORE_HOME },
         })
         return { text: String(out || '').trim() || ('accepted ' + id) }
       } catch (error) {

@@ -16,9 +16,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-DSH_HOME = Path(os.environ.get('DSH_HOME', str(Path.home() / '.dsh')))
-HOME = Path(os.environ.get('CORE_HOME', str(DSH_HOME / 'agent-core')))
-SESSIONS = Path(os.environ.get('DSH_SESSIONS', str(DSH_HOME / 'sessions')))
+HOME = Path(os.environ.get('CORE_HOME', str(Path.home() / '.dsh' / 'agent-core')))
+SESSIONS = Path(os.environ.get('DSH_SESSIONS', str(Path.home() / '.dsh' / 'sessions')))
 PENDING = HOME / 'memory' / '待记'
 STATE = HOME / '运行' / 'sentinel.json'
 UNZSTD = Path(__file__).with_name('unzstd.mjs')

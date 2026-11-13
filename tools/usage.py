@@ -36,9 +36,10 @@ import shutil
 import subprocess
 import sys
 
-# 数据根目录：DSH_HOME 默认为 ~/.dsh
-DSH_HOME = os.environ.get("DSH_HOME") or os.path.join(os.path.expanduser("~"), ".dsh")
-DEFAULT_ROOT = os.path.join(DSH_HOME, "sessions")
+# 数据根目录：路径常量走 lib/paths，DSH_HOME 默认为 ~/.dsh
+from lib.paths import DSH_HOME  # noqa: E402
+
+DEFAULT_ROOT = str(DSH_HOME / "sessions")
 
 # ---------------------------------------------------------------------------
 # 价格表（只给估算用；来源见 PRICE_SOURCE，不确定就如实标）
@@ -49,7 +50,7 @@ DEFAULT_ROOT = os.path.join(DSH_HOME, "sessions")
 # 「未命中输入价」并写出假设。
 # ---------------------------------------------------------------------------
 PRICE_SOURCE = {
-    "写入日期": "2026-11-11（手工填进脚本，脚本不联网，未核对过任何页面）",
+    "写入日期": "2026-11-11（用户手工写进脚本，脚本不联网，未核对过任何页面）",
     "参考页面": "DeepSeek 官方定价页 https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
     "可信度": "不可信：数字是凭记忆填的占位值，只用来演示算法，不是官方价",
     "怎么改": "翻官方页核对后改下面 PRICING；改完跑 usage.py --prices 看一眼",

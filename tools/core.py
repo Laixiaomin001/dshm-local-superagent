@@ -34,24 +34,28 @@ import sys
 import tarfile
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
+HOME = Path(os.environ.get('CORE_HOME', str(Path.home() / '.dsh' / 'agent-core')))
 DSH_HOME = Path(os.environ.get('DSH_HOME', str(Path.home() / '.dsh')))
-HOME = Path(os.environ.get('CORE_HOME', str(DSH_HOME / 'agent-core')))
+PLUGINS_DIR = Path(os.environ.get('DSH_PLUGINS', str(DSH_HOME / 'plugins')))
 MEM = HOME / 'memory'
 FLOW = MEM / '流水'
 PENDING = MEM / '待记'
 DIGEST = MEM / '日报'
 RUN = HOME / '运行'
 REVIEW = RUN / '待审'
+LEDGER = RUN / '派单台账'
+LEDGER_ARCHIVE = LEDGER / '归档'
 LESSONS = RUN / '教训.md'
 DB = MEM / '索引.db'
 STATE = MEM / '状态.json'
 HEALTH = HOME / 'health.json'
 LOCK = MEM / '.core.lock'
 CONSUMED = PENDING / '.consumed.json'
-EXPORT_ROOT = Path(os.environ.get('CORE_EXPORT', str(DSH_HOME / 'exports')))
+EXPORT_ROOT = Path(os.environ.get('EXPORT_ROOT') or os.environ.get('CORE_EXPORT')
+                   or str(Path.home() / '.dsh' / 'exports'))
 MAX_PENDING_BYTES = 512 * 1024
 SEARCH_BYTES = 2000
 GET_BYTES = 8000
@@ -172,7 +176,7 @@ def record_text(title, at, occurred, domain, salience, who, tags, source, said, 
 def index_one(conn: sqlite3.Connection, name: str, text: str) -> None:
     p = parse_flow(text)
     m = p['meta']
-    # 索引用正文，去掉小标题，免得多条结果里全是「## 原话」
+    # 索引用正文，去掉小标题，免得多条结果里全是「## 他说了啥」
     body = '\n'.join(l for l in p['body'].splitlines() if not l.strip().startswith('## '))
     conn.execute(
         'INSERT OR REPLACE INTO docs(name,title,at,occurred,domain,salience,who,tags,source,sha1,bytes,body) '
@@ -513,7 +517,7 @@ def cmd_status(a) -> int:
 
 
 def snapshot() -> str:
-    """把整本账导到 $DSH_HOME/exports/agent-core-latest，并留当天 tar.gz（最多 7 份）。"""
+    """把整本账导到 $EXPORT_ROOT/agent-core-latest，并留当天 tar.gz（最多 7 份）。"""
     EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
     latest = EXPORT_ROOT / 'agent-core-latest'
     r = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'export', '--out', str(latest)],
@@ -566,8 +570,11 @@ def cmd_doctor(a) -> int:
     chk('卡住工单 =0', stuck == 0, f'{stuck} 张')
     chk('账本对账', command_verify())
     tars = sorted(EXPORT_ROOT.glob('agent-core-*.tar.gz'), key=lambda x: x.stat().st_mtime)
-    chk('异地备份 <8d', bool(tars) and (time.time() - tars[-1].stat().st_mtime) / 86400 < 8,
-        tars[-1].name if tars else '没有')
+    # 只查本机导出目录的 tar，远端没有副本，不是异地备份
+    snap_ok = bool(tars) and (time.time() - tars[-1].stat().st_mtime) / 86400 < 8
+    chk('本机快照', snap_ok,
+        f'{tars[-1].name} · 8 天内；远端无副本' if snap_ok
+        else f"{tars[-1].name if tars else '没有'}（异地副本不存在）")
     # 心声断档：只认标题带「心声·」的件，最新一件超 72h 亮黄，不阻断
     last_heart = None
     for f in FLOW.glob('*.md'):
@@ -589,6 +596,44 @@ def cmd_doctor(a) -> int:
         days = (now() - last_heart).total_seconds() / 86400
         ago = '<3d' if days <= 3 else f'{days:.0f}d'
         chk('心声断档', days <= 3, f'{ago} · 最近 {last_heart:%Y-%m-%d}', warn=True)
+    # 图谱一致性：只查结构断言，不查天天会变的数字
+    gbad = []
+    try:
+        gp = RUN / '图谱.md'
+        if not gp.exists():
+            gbad.append('缺 运行/图谱.md')
+        elif gp.stat().st_size < 4096:
+            gbad.append(f'图谱.md {gp.stat().st_size} 字节 < 4096')
+    except Exception:
+        gbad.append('读不到 运行/图谱.md')
+    try:
+        md = (RUN / '手册' / '整理.md').read_text(encoding='utf-8')
+        parts = md.split('## dream 十三步', 1)
+        if len(parts) < 2:
+            gbad.append('整理.md 缺「## dream 十三步」')
+        else:
+            body = parts[1].split('\n## ', 1)[0]
+            steps = [ln for ln in body.splitlines() if re.match(r'\s*\d+\.', ln)]
+            if len(steps) < 13:
+                gbad.append(f'dream 步骤 {len(steps)} 条 < 13')
+    except Exception:
+        gbad.append('读不到 手册/整理.md')
+    try:
+        sch = json.loads((DSH_HOME / 'storages' / 'schedule.json')
+                         .read_text(encoding='utf-8'))
+        tasks = ((sch.get('tables') or {}).get('tasks') or {})
+        act = sum(1 for v in tasks.values() if isinstance(v, dict) and v.get('status') == 'active')
+        if act < 2:
+            gbad.append(f'schedule active {act} 条 < 2')
+    except Exception:
+        gbad.append('读不到 storages/schedule.json')
+    for name in ('guard', 'ctx-guard', 'delegate'):
+        if not (PLUGINS_DIR / name).is_dir():
+            gbad.append(f'缺 {PLUGINS_DIR / name}')
+    if not (PLUGINS_DIR / 'ctx-guard' / 'tone.js').exists():
+        gbad.append(f'缺 {PLUGINS_DIR / "ctx-guard" / "tone.js"}')
+    chk('图谱一致性', not gbad, '；'.join(gbad) if gbad else '图谱一致')
+
     bad = [c for c in checks if not c[1] and not c[3]]
     warn = [c for c in checks if not c[1] and c[3]]
     for name, ok, detail, w in checks:
@@ -746,7 +791,7 @@ def scan_lessons(day: str) -> tuple[int, str]:
 UNDECIDED_DOMAINS = ('', '未判')
 
 FACT_CONNECTORS = ('叫', '是', '在', '用', '有')
-FACT_SUBJ_SUFFIX = ('机器', '手机', '平板', '电脑', '引擎', '系统', '服务器',
+FACT_SUBJ_SUFFIX = ('机器', '手机', '平板', '电脑', '引擎', '系统', '服务器', '远端',
                     '账本', '索引', '端口', '模型', '软件', '数据库', '账号', '备份',
                     '目录', '文件', '脚本', '命令', '插件', '工具', '配置', '版本',
                     '地址', '密码', '密钥', '设备', '进程', '服务', '路径', '任务',
@@ -770,7 +815,7 @@ def _fact_subject_ok(s: str) -> bool:
         return True
     if re.fullmatch(r'[A-Za-z][\w.+\-]{1,30}', s):
         return True
-    if s in ('我', '你', '他', '她'):
+    if s in ('我', '你', '他', '她', '用户'):
         return True
     if re.search(r'[\u4e00-\u9fff]', s) and s.endswith(FACT_SUBJ_SUFFIX):
         return True
@@ -778,7 +823,7 @@ def _fact_subject_ok(s: str) -> bool:
 
 
 def _fact_location_like(v: str) -> bool:
-    return bool(re.search(r'/|里|上|中|下|盘|云|手机|本机|机器|目录|服务器', v))
+    return bool(re.search(r'/|里|上|中|下|盘|云|远端|手机|本机|机器|目录|服务器', v))
 
 
 def _fact_triple(seg: str):
@@ -953,7 +998,53 @@ def tone_report(day: datetime | None = None) -> str:
     return f'{n} 条，不合格 {rate}%'
 
 
+def sweep_ledger() -> str:
+    """台账按天分文件：30 天前的挪进 归档/，归档里 180 天前的删掉。返回清了几份。"""
+    if not LEDGER.exists():
+        return '清 0 份'
+    today = now().date()
+    n = 0
+    moved: set[str] = set()
+
+    def day_of_name(p: Path) -> date | None:
+        s = p.stem
+        if len(s) != 8 or not s.isdigit():
+            return None
+        try:
+            return date(int(s[:4]), int(s[4:6]), int(s[6:]))
+        except ValueError:
+            return None
+
+    for f in sorted(LEDGER.glob('*.jsonl')):
+        d = day_of_name(f)
+        if d is None or (today - d).days <= 30:
+            continue
+        LEDGER_ARCHIVE.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(f), str(LEDGER_ARCHIVE / f.name))
+        moved.add(f.name)
+        n += 1
+
+    if LEDGER_ARCHIVE.exists():
+        for f in sorted(LEDGER_ARCHIVE.glob('*.jsonl')):
+            d = day_of_name(f)
+            if d is not None and (today - d).days > 180:
+                f.unlink()
+                if f.name not in moved:  # 刚挪进来的同一份不重复数
+                    n += 1
+    return f'清 {n} 份'
+
+
 def cmd_dream(a) -> int:
+    # dream 自己的日志：起步和收尾各留一行，写不进去不影响主流程
+    def _dream_log(line: str) -> None:
+        try:
+            (RUN / 'dream.log').parent.mkdir(parents=True, exist_ok=True)
+            with (RUN / 'dream.log').open('a', encoding='utf-8') as f:
+                f.write(line + '\n')
+        except Exception:
+            pass
+
+    _dream_log(f'started {iso()}')
     ensure_dirs()
     init_db()
     steps = []
@@ -992,7 +1083,7 @@ def cmd_dream(a) -> int:
     step('factcand', lambda: (lambda n: f'{n} 条候选')(scan_factcand(now().strftime('%Y%m%d'))[0]))
     step('tone', tone_report)
     def _vectors_step():
-        # 向量是锦上添花：接口不通或报错只降级，不拖红整轮
+        # 向量是锦上添花：嵌入接口不通或报错只降级，不拖红整轮
         try:
             r = subprocess.run(
                 [sys.executable, str(Path(__file__).with_name('vectors.py')), 'rebuild'],
@@ -1019,6 +1110,7 @@ def cmd_dream(a) -> int:
     step('recall', _recall_step)
     step('doctor', lambda: _child(
         [sys.executable, str(Path(__file__).resolve()), 'doctor'], 180, last_line=True))
+    step('ledger', sweep_ledger)
     step('backup', lambda: snapshot())
     ok = all(s['ok'] for s in steps)
     health = {
@@ -1030,6 +1122,7 @@ def cmd_dream(a) -> int:
         'consumed': consumed,
     }
     atomic_write(HEALTH, json.dumps(health, ensure_ascii=False, indent=1))
+    _dream_log(f"done ok={'true' if ok else 'false'} {iso()}")
     if a.json:
         print(json.dumps(health, ensure_ascii=False))
     else:

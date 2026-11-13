@@ -10,7 +10,8 @@
 用法：
   queue.py add   --title T --task "..." [--key K] [--cwd /path] [--session ID]
   queue.py list
-  queue.py claim ID
+  queue.py claim ID [--worker 谁认领的]
+  queue.py heartbeat ID
   queue.py done  ID --result "..." [--out /path]
   queue.py fail  ID --reason "..."
   queue.py sweep [--older 1800]
@@ -31,6 +32,9 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'protocol'))
+from validate import validate_order, validate_status_transition
 
 HOME = Path(os.environ.get('CORE_HOME', str(Path.home() / '.dsh' / 'agent-core')))
 Q = HOME / 'queue'
@@ -145,6 +149,8 @@ def cmd_add(a) -> int:
            'session': a.session or '', 'created': iso(), 'status': 'queued'}
     if key:
         rec['key'] = key
+    if not _guard(rec, 'inbox'):
+        return 1
     (INBOX / f'{qid}.json').write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding='utf-8')
     print(f'queued {qid}  {a.title}')
     if done_before is not None:
@@ -184,13 +190,58 @@ def cmd_claim(a) -> int:
     if dst.exists():
         print(f'[error] {a.id} 已在 running')
         return 1
-    os.rename(p, dst)
-    rec = json.loads(dst.read_text(encoding='utf-8'))
+    try:
+        rec = json.loads(p.read_text(encoding='utf-8'))
+    except Exception as e:
+        print(f'[error] {p.name} 读不出来：{e}')
+        return 1
+    # 同一把 key 已经在 running：不认第二张，留给调用方等它结束。
+    # add 在入口拦过一次，这里拦的是手写单和两路并发（delegate 可能同时认领）。
+    key = str(rec.get('key') or '').strip()
+    if key:
+        for other in sorted(RUNNING.glob('*.json')):
+            try:
+                r = json.loads(other.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            if str(r.get('key') or '').strip() != key:
+                continue
+            print(f'[error] 同一件事已经有一单在跑：{r.get("id") or other.stem}')
+            return 1
+    if not _guard({**rec, 'status': 'running', 'started': iso()},
+                  'running', old=rec.get('status')):
+        return 1
+    try:
+        os.rename(p, dst)
+    except FileNotFoundError:
+        # rename 是原子的：另一个进程（delegate 轮询）先抢走了
+        print(f'[error] {a.id} 已被别的进程认领')
+        return 1
     rec['status'] = 'running'
     rec['started'] = iso()
     rec['heartbeat'] = rec['started']
+    worker = str(getattr(a, 'worker', '') or '').strip()
+    if worker:
+        rec['worker'] = worker
     _write(dst, rec)
     print(dst.read_text(encoding='utf-8'))
+    return 0
+
+
+def cmd_heartbeat(a) -> int:
+    """刷新 running 单的 heartbeat。只动 running 里那一张，单不在了返回非 0。"""
+    p = RUNNING / f'{a.id}.json'
+    if not p.exists():
+        print(f'[error] running 里没有 {a.id}')
+        return 1
+    try:
+        rec = json.loads(p.read_text(encoding='utf-8'))
+    except Exception as e:
+        print(f'[error] {p.name} 读不出来：{e}')
+        return 1
+    rec['heartbeat'] = iso()
+    _write(p, rec)
+    print(rec['heartbeat'])
     return 0
 
 
@@ -202,6 +253,8 @@ def finish(qid: str, src_dir: Path, extra: dict) -> int:
     rec = json.loads(p.read_text(encoding='utf-8'))
     rec.update(extra)
     rec['finished'] = iso()
+    if not _guard(rec, 'done', old='running'):
+        return 1
     (DONE / f'{qid}.json').write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding='utf-8')
     p.unlink()
     print(f'done {qid}')
@@ -221,8 +274,11 @@ def cmd_fail(a) -> int:
         print(f'[error] 没有 {a.id}')
         return 1
     rec = json.loads(p.read_text(encoding='utf-8'))
+    old = rec.get('status')
     rec.update({'ok': False, 'status': 'failed',
                 'reason': (a.reason or '')[:2000], 'finished': iso()})
+    if not _guard(rec, 'failed', old=old):
+        return 1
     (STUCK / f'{a.id}.json').write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding='utf-8')
     p.unlink()
     print(f'stuck {a.id}')
@@ -242,9 +298,13 @@ def cmd_sweep(a) -> int:
             except Exception:
                 pass
             continue
-        rec = json.loads(p.read_text(encoding='utf-8'))
-        # 按开始时间算超时；有心跳就用最新的心跳，没有 started 的老单退回 created
-        ts = rec.get('heartbeat') or rec.get('started') or rec.get('created') or ''
+        try:
+            rec = json.loads(p.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        # 按开始时间算超时：有心跳用最新心跳（插件每 60 秒刷），否则用 started；
+        # 两个都没有的老单用文件 mtime。created 是排队时间，不能拿来判超时。
+        ts = str(rec.get('heartbeat') or rec.get('started') or '')
         try:
             t = datetime.fromisoformat(ts).timestamp()
         except Exception:
@@ -300,6 +360,16 @@ def _attempts(rec: dict) -> int:
 
 def _write(p: Path, rec: dict) -> None:
     p.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding='utf-8')
+
+
+def _guard(rec, where, old=None):
+    ok, errs = validate_order(rec, where=where)
+    tok, why = validate_status_transition(old, rec.get('status')) if old else (True, '')
+    if not tok:
+        errs.append(why)
+    for e in errs:
+        print(f'[error] {rec.get("id")} 不合协议：{e}')
+    return not errs
 
 
 def cmd_accept(a) -> int:
@@ -436,7 +506,11 @@ def main() -> int:
     sub.add_parser('list').set_defaults(fn=cmd_list)
     cl = sub.add_parser('claim')
     cl.add_argument('id')
+    cl.add_argument('--worker', default='', help='谁认领的（写进单里，方便区分）')
     cl.set_defaults(fn=cmd_claim)
+    hb = sub.add_parser('heartbeat')
+    hb.add_argument('id')
+    hb.set_defaults(fn=cmd_heartbeat)
     dn = sub.add_parser('done')
     dn.add_argument('id')
     dn.add_argument('--result', default='')
