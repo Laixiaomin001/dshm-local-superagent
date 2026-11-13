@@ -1,0 +1,8 @@
+{
+  "name": "dsh-delegate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "Local delegate: queue a task from this session, poll it in-process, run it in a child agent session, and report the result back to this session. No network, no repository."
+}

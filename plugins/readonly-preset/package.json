@@ -1,0 +1,9 @@
+{
+  "name": "dsh-readonly-preset",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "description": "Register the read-only main-session agent preset at runtime, bypassing the home YAML precheck."
+}
