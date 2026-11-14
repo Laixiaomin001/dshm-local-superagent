@@ -1,5 +1,68 @@
 # 一个运行在本地，拥有独立人格，自我进化，不间断会话，永久记忆的 superagent
 
+### 架构分层
+
+```mermaid
+flowchart TB
+  subgraph L5[调度层]
+    T[定时任务 · target=new]
+    HB[心跳 · 每天三次醒来]
+    DP[delegate pump]
+  end
+  subgraph L4[视图层 · 可重建]
+    IDX[索引.db]
+    VEC[向量.jsonl]
+    RES[常驻页]
+    CON[接续卡]
+  end
+  subgraph L3[适配层 · 插件]
+    G[guard]
+    C[ctx-guard]
+    D[delegate]
+  end
+  subgraph L2[服务层 · 脚本]
+    CO[core.py]
+    QU[queue.py]
+    FA[fact.py]
+    RE[recall.py]
+  end
+  subgraph L1[协议层]
+    SC[queue.schema.json]
+    VA[validate.py]
+  end
+  subgraph L0[正本层 · 只追加]
+    FL[流水/]
+    FC[事实.jsonl]
+    QD[queue/]
+  end
+  L3 --> L2
+  L2 --> L1
+  L1 --> L0
+  L2 --> L4
+  L5 --> L3
+```
+
+上面是分层，下面是一条单从进来到收尾的轨迹。
+
+### 一次派单走完的流程
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant M as 主会话
+  participant Q as 队列
+  participant S as 子会话
+  U->>M: 一句话
+  M->>Q: queue.py add（过协议校验）
+  Q-->>M: 单进 inbox
+  S->>Q: 插件 poll 后 claim
+  Q-->>S: running，带 worker 和 started
+  S->>S: 干活
+  S->>Q: done，写 ok/result/finished
+  S-->>M: 回执
+  M->>Q: accept
+```
+
 这是一套跑在单机上的 agent 骨架：会话可以换页，账本不会断；上下文有上限，记忆没有。它不依赖云端的会话存储，也不把判断交给外部服务。所有状态落在本地文件里，纯文本可读，派生数据可重建。
 
 代码分两层。插件层挂在 DSH 的 cordis 总线上，管边界、上下文、派单和会话形态；工具层是十四个不依赖第三方库的 Python 脚本，管记账、检索、收料、自检和常驻页。两层之间只通过文件和环境变量耦合，任何一层都可以单独替换。
